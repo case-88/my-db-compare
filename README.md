@@ -180,25 +180,56 @@ A table is compared when it matches at least one `include` pattern and no `exclu
 
 ### Mapping tables and columns
 
-When a table or its columns were renamed on the target, map them in `mappings`:
+By default a source table is compared with the target table **of the same name**, column by column **with the same names**. When the target was renamed during a migration, tell the tool how the two line up with `mappings`:
 
 ```yaml
 mappings:
-  - source: app.users
-    target: app_v2.members
-    columns:              # source column: target column
+  - source: app.users          # table on the source
+    target: app_v2.members     # table it was copied to on the target
+    columns:                   # source column: target column
       id: member_id
       name: full_name
+
+  - source: shop.orders
+    target: shop.orders_new    # only the table was renamed
 ```
 
-- Columns you don't list are assumed to have the **same name** on both sides.
-- Key columns follow the same rule. If the primary key was renamed, list it in `columns`.
-- Rows are matched by the **source** table's primary key (or unique key).
-- Mapped tables are always compared, even if `tables.include` / `exclude` would skip them.
-- Before comparing, the tool checks that every mapped table and column exists, and stops with an error if one does not.
-- Results use the source table and column names.
+```
+ source  app.users                    target  app_v2.members
+ ┌─────────────────────┐              ┌─────────────────────┐
+ │ id     (PK)         │ ───────────▶ │ member_id   (PK)    │   listed in columns
+ │ name                │ ───────────▶ │ full_name           │   listed in columns
+ │ email               │ ───────────▶ │ email               │   not listed → same name
+ └─────────────────────┘              └─────────────────────┘
+```
 
-> **Current limits:** mappings work in `sample` mode only, and cannot be combined with `generate_correction_queries`.
+#### Rules
+
+| Rule | Details |
+|------|---------|
+| **Unlisted columns keep their name** | List only the columns that were renamed. |
+| **Key columns follow the same mapping** | Rows are matched by the **source** table's primary key (or unique key, if it has no primary key). If the key was renamed, list it in `columns` like any other column. |
+| **Every source column must exist on the target** | The target may have *extra* columns; they are ignored. But a source column that has no counterpart on the target is an error. |
+| **Mapped tables are always compared** | Even when `tables.include` / `exclude` would skip them. Write each source table once. |
+| **Source names ignore case** | `source` and the column keys are matched to the source table and columns case-insensitively. The `target` table name is used exactly as written, so write it with the target's real case. |
+| **Typos stop the run** | Before comparing, the tool checks every mapped table and column on both sides and exits with an error that names the missing one. Without this check a typo would look like every row is missing from the target. |
+
+#### What you get in the results
+
+Results always use **source** names, so mapped and unmapped tables read the same. Queries that run on the target use **target** names:
+
+| Field | Uses | Example for the mapping above |
+|-------|------|-------------------------------|
+| `table`, `pk`, `source`, `target`, `diff_columns` | source names | `"pk": {"id": 7}`, `"diff_columns": ["name"]` |
+| `query` | source names, runs on the source | ``SELECT `id`, `name` FROM `app`.`users` WHERE `id` = 7;`` |
+| `target_query` | target names, aliased back to source names | ``SELECT `member_id` AS `id`, `full_name` AS `name` FROM `app_v2`.`members` WHERE `member_id` = 7;`` |
+| `correction_query` | target names | ``UPDATE `app_v2`.`members` SET `full_name` = 'Kim' WHERE `member_id` = 7;`` |
+
+`target_query` appears only for mapped tables.
+
+#### Mappings and retry
+
+`retry` re-reads each mismatch with `query` on the source and `target_query` on the target. Run it with **the same `mappings`** used to produce the results. If the config and a result file disagree about whether a table is mapped, those records are kept as they were (never reported as resolved), and a warning is logged.
 
 ## Choosing a mode
 
@@ -250,7 +281,7 @@ results/
   "diff_columns": ["status", "updated_at"],
   "source": {"id": 123, "status": "active",   "updated_at": "2026-01-01 10:00:00"},
   "target": {"id": 123, "status": "inactive", "updated_at": "2026-01-01 09:00:00"},
-  "query": "SELECT * FROM `app`.`users` WHERE `id` = 123;",
+  "query": "SELECT `id`, `status`, `updated_at` FROM `app`.`users` WHERE `id` = 123;",
   "correction_query": "UPDATE `app`.`users` SET `status` = 'active', `updated_at` = '2026-01-01 10:00:00' WHERE `id` = 123;",
   "timestamp": "2026-01-01T12:00:45Z"
 }
@@ -260,8 +291,9 @@ results/
 |-------|---------|
 | `type` | `DATA_MISMATCH` (row exists in both but differs), `MISSING_IN_TARGET`, or `MISSING_IN_SOURCE` |
 | `diff_columns` | Columns whose values differ |
-| `query` | A `SELECT` that reproduces the row, for manual checking |
-| `correction_query` | SQL that makes the target match the source. Present only when `generate_correction_queries` is `true`. **Review it before running it.** |
+| `query` | A `SELECT` on the source that reproduces the row (key and differing columns), for manual checking |
+| `target_query` | The same `SELECT` for the target, written with target names. Present only for [mapped tables](#mapping-tables-and-columns) |
+| `correction_query` | SQL that makes the target match the source, using the target's table and column names. Present only when `generate_correction_queries` is `true`. **Review it before running it.** |
 
 `summary.json` also records `run_mode` (`sample`, `full` or `retry`) and, for retry runs, the `input_dir` that was re-checked.
 
