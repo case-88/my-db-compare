@@ -3,6 +3,7 @@ package comparator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,10 +15,11 @@ import (
 
 // FullCompareConfig holds configuration for full comparison
 type FullCompareConfig struct {
-	ChunkSize   int // Number of rows per chunk
-	DelayMs     int // Delay between chunks in milliseconds
-	Parallelism int // Number of parallel partition workers
-	Options     ComparatorOptions
+	ChunkSize           int // Number of rows per chunk
+	DelayMs             int // Delay between chunks in milliseconds
+	Parallelism         int // Number of parallel partition workers
+	Options             ComparatorOptions
+	CheckTargetOnlyRows bool
 }
 
 // DefaultFullCompareConfig returns default configuration
@@ -59,16 +61,18 @@ func (p *FullCompareProgress) GetProgress() (processed, total int64, mismatchCou
 
 // FullCompareResult holds the result of full comparison for a table
 type FullCompareResult struct {
-	Table           string
-	TotalRows       int64
-	ProcessedRows   int64
-	MatchCount      int64
-	MismatchCount   int64
-	MissingInTarget int64
-	MissingInSource int64
-	Different       int64
-	Duration        time.Duration
-	Error           error
+	Table             string
+	TotalRows         int64
+	ProcessedRows     int64
+	MatchCount        int64
+	MismatchCount     int64
+	MissingInTarget   int64
+	MissingInSource   int64
+	Different         int64
+	TargetRowsChecked int64
+	TargetOnlyChecked bool
+	Duration          time.Duration
+	Error             error
 }
 
 // FullComparer performs full table comparison
@@ -123,6 +127,26 @@ func (fc *FullComparer) CompareTable(
 	progressCh chan<- *FullCompareProgress,
 ) (*FullCompareResult, error) {
 	start := time.Now()
+	result, err := fc.compareTablePass(ctx, table, target, columns, handler, progressCh, false)
+	if err == nil && fc.config.CheckTargetOnlyRows {
+		reverse, reverseErr := fc.compareTablePass(ctx, table, target, table.KeyColumns(), handler, nil, true)
+		result.TargetRowsChecked = reverse.TargetRowsChecked
+		result.MissingInSource += reverse.MissingInSource
+		result.MismatchCount += reverse.MismatchCount
+		result.TargetOnlyChecked = reverseErr == nil
+		err = reverseErr
+	}
+	result.Error = err
+	result.Duration = time.Since(start)
+	return result, err
+}
+
+// compareTablePass는 정방향 데이터 또는 역방향 키 존재 여부를 검사한다.
+func (fc *FullComparer) compareTablePass(
+	ctx context.Context, table, target types.TableMeta, columns []string,
+	handler MismatchHandler, progressCh chan<- *FullCompareProgress, targetOnly bool,
+) (*FullCompareResult, error) {
+	start := time.Now()
 	result := &FullCompareResult{
 		Table:     table.FullName(),
 		TotalRows: table.EstimatedRows,
@@ -134,11 +158,13 @@ func (fc *FullComparer) CompareTable(
 		return result, result.Error
 	}
 
-	keyColumn := keyColumns[0]
-
 	// Get min/max values
-	srcMeta := db.NewMetaQuerier(fc.srcConn, fc.logger)
-	minVal, maxVal, err := srcMeta.GetMinMax(ctx, table.Schema, table.Name, keyColumns)
+	scanTable, scanConn := table, fc.srcConn
+	if targetOnly {
+		scanTable, scanConn = target, fc.targetConn
+	}
+	srcMeta := db.NewMetaQuerier(scanConn, fc.logger)
+	minVal, maxVal, err := srcMeta.GetMinMax(ctx, scanTable.Schema, scanTable.Name, scanTable.PhysicalColumns(keyColumns))
 	if err != nil {
 		result.Error = fmt.Errorf("failed to get min/max: %w", err)
 		return result, result.Error
@@ -163,14 +189,23 @@ func (fc *FullComparer) CompareTable(
 
 	// Start progress reporter (every 1 minute)
 	progressDone := make(chan struct{})
+	var progressWG sync.WaitGroup
 	if progressCh != nil {
+		progressWG.Add(1)
 		go func() {
+			defer progressWG.Done()
 			ticker := time.NewTicker(1 * time.Minute)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					progressCh <- progress
+					select {
+					case progressCh <- progress:
+					case <-progressDone:
+						return
+					case <-ctx.Done():
+						return
+					}
 				case <-progressDone:
 					return
 				}
@@ -180,13 +215,13 @@ func (fc *FullComparer) CompareTable(
 
 	// Process partitions in parallel
 	var wg sync.WaitGroup
-	resultCh := make(chan *partitionResult, fc.config.Parallelism)
+	resultCh := make(chan *partitionResult, len(partitions))
 
 	for _, partition := range partitions {
 		wg.Add(1)
 		go func(p PartitionRange) {
 			defer wg.Done()
-			pr := fc.comparePartition(ctx, table, target, keyColumn, columns, p, handler, progress)
+			pr := fc.comparePartition(ctx, table, target, columns, p, handler, progress, targetOnly)
 			resultCh <- pr
 		}(partition)
 	}
@@ -208,24 +243,30 @@ func (fc *FullComparer) CompareTable(
 		result.MissingInTarget += pr.MissingInTarget
 		result.MissingInSource += pr.MissingInSource
 		result.Different += pr.Different
+		result.TargetRowsChecked += pr.TargetRowsChecked
 	}
 
 	// Stop progress reporter
 	close(progressDone)
+	progressWG.Wait()
 
 	result.Duration = time.Since(start)
-	return result, nil
+	if result.Error == nil {
+		result.Error = ctx.Err()
+	}
+	return result, result.Error
 }
 
 // partitionResult holds results from processing a partition
 type partitionResult struct {
-	ProcessedRows   int64
-	MatchCount      int64
-	MismatchCount   int64
-	MissingInTarget int64
-	MissingInSource int64
-	Different       int64
-	Error           error
+	ProcessedRows     int64
+	MatchCount        int64
+	MismatchCount     int64
+	MissingInTarget   int64
+	MissingInSource   int64
+	Different         int64
+	TargetRowsChecked int64
+	Error             error
 }
 
 // comparePartition compares all chunks in a partition
@@ -233,22 +274,26 @@ func (fc *FullComparer) comparePartition(
 	ctx context.Context,
 	table types.TableMeta,
 	target types.TableMeta,
-	keyColumn string,
 	columns []string,
 	partition PartitionRange,
 	handler MismatchHandler,
 	progress *FullCompareProgress,
+	targetOnly bool,
 ) *partitionResult {
 	result := &partitionResult{}
 
-	// Column list for query
-	colList := buildColumnListForQuery(columns)
+	scanTable, scanConn := table, fc.srcConn
+	lookupTable, lookupConn := target, fc.targetConn
+	if targetOnly {
+		scanTable, scanConn = target, fc.targetConn
+		lookupTable, lookupConn = table, fc.srcConn
+	}
 
 	// Get comparator
 	comp := NewComparatorWithOptions(table.KeyColumns(), fc.config.Options)
 
 	// Process chunks
-	currentMin := partition.MinValue
+	var cursor types.Row
 	delay := time.Duration(fc.config.DelayMs) * time.Millisecond
 
 	for {
@@ -260,9 +305,9 @@ func (fc *FullComparer) comparePartition(
 		}
 
 		// Fetch chunk from source
-		srcRows, nextMin, err := fc.fetchChunk(ctx, fc.srcConn, table, keyColumn, colList, currentMin, partition.MaxValue, fc.config.ChunkSize)
+		srcRows, nextCursor, err := fc.fetchChunk(ctx, scanConn, scanTable, columns, partition.MinValue, partition.MaxValue, cursor, fc.config.ChunkSize)
 		if err != nil {
-			result.Error = fmt.Errorf("failed to fetch source chunk: %w", err)
+			result.Error = fmt.Errorf("failed to fetch chunk from %s: %w", scanTable.FullName(), err)
 			return result
 		}
 
@@ -271,21 +316,27 @@ func (fc *FullComparer) comparePartition(
 		}
 
 		// Fetch same keys from target
-		targetRows, err := fc.fetchByKeys(ctx, fc.targetConn, target, columns, srcRows, table.KeyColumns())
+		targetRows, err := fc.fetchByKeys(ctx, lookupConn, lookupTable, columns, srcRows, table.KeyColumns())
 		if err != nil {
-			result.Error = fmt.Errorf("failed to fetch target rows: %w", err)
+			result.Error = fmt.Errorf("failed to lookup keys in %s: %w", lookupTable.FullName(), err)
 			return result
 		}
 
 		// Compare
 		compareResult := comp.CompareSamples(srcRows, targetRows)
+		if targetOnly {
+			// 공통 행의 값 차이와 일치 건수는 정방향에서만 집계한다.
+			compareResult = &CompareResult{MissingInSrc: compareResult.MissingInTarget}
+			result.TargetRowsChecked += int64(len(srcRows))
+		} else {
 
-		// Count results
-		result.ProcessedRows += int64(len(srcRows))
-		result.MatchCount += int64(compareResult.Matched)
+			// Count results
+			result.ProcessedRows += int64(len(srcRows))
+			result.MatchCount += int64(compareResult.Matched)
 
-		// Update progress
-		atomic.AddInt64(&progress.ProcessedRows, int64(len(srcRows)))
+			// Update progress
+			atomic.AddInt64(&progress.ProcessedRows, int64(len(srcRows)))
+		}
 
 		// Handle mismatches
 		if len(compareResult.MissingInTarget) > 0 || len(compareResult.MissingInSrc) > 0 || len(compareResult.Different) > 0 {
@@ -309,7 +360,8 @@ func (fc *FullComparer) comparePartition(
 			// Call handler for immediate processing (logging)
 			if handler != nil && len(mismatches) > 0 {
 				if err := handler(mismatches); err != nil {
-					fc.logger.Warn("mismatch handler error", zap.Error(err))
+					result.Error = fmt.Errorf("failed to write mismatches: %w", err)
+					return result
 				}
 			}
 		}
@@ -319,15 +371,22 @@ func (fc *FullComparer) comparePartition(
 		targetRows = nil
 
 		// Check if we've reached the end
-		if nextMin == nil {
+		if nextCursor == nil {
 			break
 		}
 
-		currentMin = nextMin
+		cursor = nextCursor
 
 		// Delay between chunks for load management
 		if delay > 0 {
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				result.Error = ctx.Err()
+				return result
+			}
 		}
 	}
 
@@ -348,6 +407,9 @@ func (fc *FullComparer) createPartitions(minVal, maxVal interface{}, count int) 
 	switch min := minVal.(type) {
 	case int64:
 		max := maxVal.(int64)
+		if max-min < 0 {
+			return []PartitionRange{{Index: 0, MinValue: min, MaxValue: max}}
+		}
 		rangeSize := (max - min) / int64(count)
 		if rangeSize == 0 {
 			return []PartitionRange{{Index: 0, MinValue: min, MaxValue: max}}
@@ -394,17 +456,33 @@ func (fc *FullComparer) fetchChunk(
 	ctx context.Context,
 	conn *db.Connection,
 	table types.TableMeta,
-	keyColumn string,
-	colList string,
+	columns []string,
 	minVal, maxVal interface{},
+	cursor types.Row,
 	limit int,
-) ([]types.Row, interface{}, error) {
+) ([]types.Row, types.Row, error) {
+	if limit < 1 {
+		return nil, nil, fmt.Errorf("chunk size must be positive")
+	}
+	keys := table.KeyColumns()
+	keyColumn := table.PhysicalColumn(keys[0])
+	where := fmt.Sprintf("`%s` >= ? AND `%s` <= ?", keyColumn, keyColumn)
+	args := []interface{}{minVal, maxVal}
+	if cursor != nil {
+		condition, values, err := keysetAfter(table, cursor)
+		if err != nil {
+			return nil, nil, err
+		}
+		where += " AND (" + condition + ")"
+		args = append(args, values...)
+	}
+	args = append(args, limit)
 	query := fmt.Sprintf(
-		"SELECT %s FROM `%s`.`%s` WHERE `%s` >= ? AND `%s` <= ? ORDER BY `%s` LIMIT ?",
-		colList, table.Schema, table.Name, keyColumn, keyColumn, keyColumn,
+		"SELECT %s FROM `%s`.`%s` WHERE %s ORDER BY %s LIMIT ?",
+		table.SelectList(columns), table.Schema, table.Name, where, buildColumnListForQuery(table.PhysicalColumns(keys)),
 	)
 
-	rows, err := conn.QueryContext(ctx, query, minVal, maxVal, limit)
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -416,7 +494,6 @@ func (fc *FullComparer) fetchChunk(
 	}
 
 	var result []types.Row
-	var lastKeyVal interface{}
 
 	for rows.Next() {
 		values := make([]interface{}, len(colNames))
@@ -432,9 +509,6 @@ func (fc *FullComparer) fetchChunk(
 		row := make(types.Row, len(colNames))
 		for i, col := range colNames {
 			row[col] = values[i]
-			if col == keyColumn {
-				lastKeyVal = values[i]
-			}
 		}
 		result = append(result, row)
 	}
@@ -444,13 +518,12 @@ func (fc *FullComparer) fetchChunk(
 	}
 
 	// If we got exactly limit rows, there may be more
-	var nextMin interface{}
-	if len(result) == limit && lastKeyVal != nil {
-		// Next query should start after the last key
-		nextMin = incrementKey(lastKeyVal)
+	var nextCursor types.Row
+	if len(result) == limit {
+		nextCursor = types.Row(extractKeyMap(result[len(result)-1], keys))
 	}
 
-	return result, nextMin, nil
+	return result, nextCursor, nil
 }
 
 // fetchByKeys fetches rows by their key values
@@ -554,23 +627,28 @@ func (fc *FullComparer) fetchByKeys(
 	return result, rows.Err()
 }
 
-// incrementKey returns the next value for pagination
-func incrementKey(v interface{}) interface{} {
-	switch val := v.(type) {
-	case int64:
-		return val + 1
-	case uint64:
-		return val + 1
-	case int:
-		return val + 1
-	case int32:
-		return val + 1
-	case uint32:
-		return val + 1
-	default:
-		// For non-numeric, return as-is (will need different pagination strategy)
-		return v
+// keysetAfter는 키 개수와 타입에 관계없이 마지막 복합 키 다음 조건을 만든다.
+func keysetAfter(table types.TableMeta, cursor types.Row) (string, []interface{}, error) {
+	keys := table.KeyColumns()
+	var terms []string
+	var args []interface{}
+	for i := range keys {
+		var parts []string
+		for j := 0; j <= i; j++ {
+			value, ok := cursor[keys[j]]
+			if !ok || value == nil {
+				return "", nil, fmt.Errorf("missing or NULL cursor key %s", keys[j])
+			}
+			op := "="
+			if j == i {
+				op = ">"
+			}
+			parts = append(parts, fmt.Sprintf("`%s` %s ?", table.PhysicalColumn(keys[j]), op))
+			args = append(args, value)
+		}
+		terms = append(terms, "("+strings.Join(parts, " AND ")+")")
 	}
+	return strings.Join(terms, " OR "), args, nil
 }
 
 // buildColumnListForQuery builds a comma-separated list of quoted column names

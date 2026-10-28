@@ -32,8 +32,6 @@ type Runner struct {
 
 	srcSampler    *sampler.Sampler
 	targetSampler *sampler.Sampler
-
-	reporter *reporter.Logger
 }
 
 // Result holds the comparison result
@@ -111,14 +109,15 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 
 	// Set config info for initial summary
 	summary.SetConfig(&reporter.RunConfig{
-		SourceHost:      r.cfg.Source.Host,
-		SourcePort:      r.cfg.Source.Port,
-		TargetHost:      r.cfg.Target.Host,
-		TargetPort:      r.cfg.Target.Port,
-		SampleSize:      r.cfg.Comparison.SampleSize,
-		Parallelism:     r.cfg.Comparison.Parallelism,
-		IncludePatterns: r.cfg.Tables.Include,
-		ExcludePatterns: r.cfg.Tables.Exclude,
+		SourceHost:          r.cfg.Source.Host,
+		SourcePort:          r.cfg.Source.Port,
+		TargetHost:          r.cfg.Target.Host,
+		TargetPort:          r.cfg.Target.Port,
+		SampleSize:          r.cfg.Comparison.SampleSize,
+		Parallelism:         r.cfg.Comparison.Parallelism,
+		IncludePatterns:     r.cfg.Tables.Include,
+		ExcludePatterns:     r.cfg.Tables.Exclude,
+		CheckTargetOnlyRows: r.cfg.Comparison.CheckTargetOnlyRows,
 	})
 
 	// Create initial summary file immediately
@@ -137,15 +136,8 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	// Initialize components
 	r.srcSampler = sampler.NewSampler(r.srcConn, r.logger)
 	r.targetSampler = sampler.NewSampler(r.targetConn, r.logger)
-
-	var err2 error
-	outputFormat := reporter.Format(r.cfg.Output.Format)
-	if outputFormat == "" {
-		outputFormat = reporter.FormatJSONL
-	}
-	r.reporter, err2 = reporter.NewLogger(r.outputDir, outputFormat, r.logger)
-	if err2 != nil {
-		return nil, fmt.Errorf("failed to create reporter: %w", err2)
+	if _, err := r.newTableLogger(); err != nil {
+		return nil, fmt.Errorf("failed to create reporter: %w", err)
 	}
 
 	if r.runMode == "retry" {
@@ -193,16 +185,10 @@ func (r *Runner) runSamplingMode(ctx context.Context, tables []types.TableMeta, 
 	}
 
 	// Send tables to workers
-	go func() {
-		for _, t := range tables {
-			select {
-			case <-ctx.Done():
-				return
-			case tableCh <- t:
-			}
-		}
-		close(tableCh)
-	}()
+	for _, t := range tables {
+		tableCh <- t
+	}
+	close(tableCh)
 
 	// Wait for workers and close result channel
 	go func() {
@@ -241,14 +227,7 @@ func (r *Runner) runSamplingMode(ctx context.Context, tables []types.TableMeta, 
 	// Stop progress reporter
 	close(progressDone)
 
-	summary.Finish()
-
-	// Save summary
-	if err := summary.SaveJSON(r.outputDir); err != nil {
-		r.logger.Warn("failed to save summary", zap.Error(err))
-	}
-
-	return &Result{Summary: summary}, nil
+	return r.finishRun(ctx, summary)
 }
 
 // runFullMode executes full data comparison
@@ -262,9 +241,10 @@ func (r *Runner) runFullMode(ctx context.Context, tables []types.TableMeta, summ
 
 	// Full comparator config
 	fullConfig := comparator.FullCompareConfig{
-		ChunkSize:   r.cfg.Comparison.GetFullModeChunkSize(),
-		DelayMs:     r.cfg.Comparison.GetFullModeDelayMs(),
-		Parallelism: r.cfg.Comparison.GetFullModeParallelism(),
+		ChunkSize:           r.cfg.Comparison.GetFullModeChunkSize(),
+		DelayMs:             r.cfg.Comparison.GetFullModeDelayMs(),
+		Parallelism:         r.cfg.Comparison.GetFullModeParallelism(),
+		CheckTargetOnlyRows: r.cfg.Comparison.CheckTargetOnlyRows,
 		Options: comparator.ComparatorOptions{
 			IgnoreDatetimePrecision:   r.cfg.Comparison.ShouldIgnoreDatetimePrecision(),
 			IgnoreZeroDatetime:        r.cfg.Comparison.ShouldIgnoreZeroDatetime(),
@@ -291,16 +271,10 @@ func (r *Runner) runFullMode(ctx context.Context, tables []types.TableMeta, summ
 	}
 
 	// Send tables to workers
-	go func() {
-		for _, t := range tables {
-			select {
-			case <-ctx.Done():
-				return
-			case tableCh <- t:
-			}
-		}
-		close(tableCh)
-	}()
+	for _, t := range tables {
+		tableCh <- t
+	}
+	close(tableCh)
 
 	// Wait for workers and close result channel
 	go func() {
@@ -339,14 +313,34 @@ func (r *Runner) runFullMode(ctx context.Context, tables []types.TableMeta, summ
 	// Wait for progress reporter to finish
 	<-progressDone
 
-	summary.Finish()
+	return r.finishRun(ctx, summary)
+}
 
-	// Save summary
-	if err := summary.SaveJSON(r.outputDir); err != nil {
-		r.logger.Warn("failed to save summary", zap.Error(err))
+// finishRun은 오류가 있는 부분 결과도 저장하고 성공과 구분한다.
+func (r *Runner) finishRun(ctx context.Context, summary *reporter.Summary) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		summary.Error = err.Error()
 	}
-
+	summary.Finish()
+	if err := summary.SaveJSON(r.outputDir); err != nil {
+		summary.Error = appendError(summary.Error, err)
+		return &Result{Summary: summary}, err
+	}
+	if ctx.Err() != nil {
+		return &Result{Summary: summary}, ctx.Err()
+	}
+	if summary.Incomplete() {
+		return &Result{Summary: summary}, fmt.Errorf("comparison incomplete: %d failed, %d skipped tables", summary.TablesFailed, summary.TablesSkipped)
+	}
 	return &Result{Summary: summary}, nil
+}
+
+func (r *Runner) newTableLogger() (*reporter.Logger, error) {
+	format := reporter.Format(r.cfg.Output.Format)
+	if format == "" {
+		format = reporter.FormatJSONL
+	}
+	return reporter.NewLogger(r.outputDir, format, r.logger)
 }
 
 // fullModeWorker processes tables in full comparison mode
@@ -360,7 +354,8 @@ func (r *Runner) fullModeWorker(
 	for table := range tables {
 		select {
 		case <-ctx.Done():
-			return
+			results <- &reporter.TableResult{Table: table.FullName(), Error: ctx.Err().Error()}
+			continue
 		default:
 		}
 
@@ -406,6 +401,11 @@ func (r *Runner) compareTableFull(
 
 	// Create full comparer
 	fullComparer := comparator.NewFullComparer(r.srcConn, r.targetConn, config, r.logger)
+	tableLogger, err := r.newTableLogger()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
 
 	// Mismatch handler - writes mismatches immediately to file
 	var mismatchMu sync.Mutex
@@ -421,15 +421,14 @@ func (r *Runner) compareTableFull(
 
 		// Open reporter for this table if not already opened
 		if !reporterOpened {
-			if err := r.reporter.Open(table.FullName()); err != nil {
+			if err := tableLogger.Open(table.FullName()); err != nil {
 				return err
 			}
 			reporterOpened = true
 		}
 
 		// Write mismatches immediately
-		r.reporter.WriteBatch(mismatches)
-		return nil
+		return tableLogger.WriteBatch(mismatches)
 	}
 
 	// Run full comparison
@@ -438,13 +437,14 @@ func (r *Runner) compareTableFull(
 	// Close reporter if it was opened
 	mismatchMu.Lock()
 	if reporterOpened {
-		r.reporter.Close()
+		if closeErr := tableLogger.Close(); closeErr != nil {
+			result.Error = closeErr.Error()
+		}
 	}
 	mismatchMu.Unlock()
 
 	if err != nil {
-		result.Error = fmt.Sprintf("full comparison failed: %v", err)
-		return result
+		result.Error = appendError(result.Error, fmt.Errorf("full comparison failed: %w", err))
 	}
 
 	// Map full result to table result
@@ -455,6 +455,11 @@ func (r *Runner) compareTableFull(
 	result.Different = int(fullResult.Different)
 	result.Verified = int(fullResult.MismatchCount) // In full mode, all mismatches are counted as verified
 	result.Duration = time.Since(start)
+	result.TargetRowsChecked = int(fullResult.TargetRowsChecked)
+	result.TargetOnlyChecked = fullResult.TargetOnlyChecked
+	if result.Error != "" {
+		return result
+	}
 
 	r.logger.Info("full comparison completed",
 		zap.String("table", table.FullName()),
@@ -707,7 +712,8 @@ func (r *Runner) worker(ctx context.Context, tables <-chan types.TableMeta, resu
 	for table := range tables {
 		select {
 		case <-ctx.Done():
-			return
+			results <- &reporter.TableResult{Table: table.FullName(), Error: ctx.Err().Error()}
+			continue
 		default:
 		}
 
@@ -744,55 +750,9 @@ func (r *Runner) compareTable(ctx context.Context, table types.TableMeta) *repor
 		zap.Int("columns", len(compareColumns)),
 	)
 
-	// Sample from source
-	var srcResult *sampler.TableSampleResult
-	var err error
-
-	// For small tables (rows <= sample_size), use direct sampling without partitioning
-	if table.EstimatedRows <= int64(r.cfg.Comparison.SampleSize) {
-		// Use SampleSize as limit since EstimatedRows can be inaccurate (could be 0 but have actual data)
-		limit := r.cfg.Comparison.SampleSize
-		r.logger.Debug("using direct sampling for small table",
-			zap.String("table", table.FullName()),
-			zap.Int64("estimated_rows", table.EstimatedRows),
-			zap.Int("limit", limit),
-		)
-		srcResult, err = r.srcSampler.SampleTableDirectWithColumns(ctx, table, limit, compareColumns)
-	} else {
-		// Create partition plan for larger tables
-		plan, planErr := r.createPartitionPlan(ctx, table)
-		if planErr != nil {
-			// Check if error is due to empty table (nil min/max values)
-			if strings.Contains(planErr.Error(), "min/max values cannot be nil") {
-				result.Skipped = true
-				result.SkipReason = "empty table (no data)"
-				r.logger.Info("compare skipped",
-					zap.String("table", table.FullName()),
-				)
-				return result
-			}
-			result.Error = fmt.Sprintf("failed to create partition plan: %v", planErr)
-			r.logger.Warn("failed to create partition plan",
-				zap.String("table", table.FullName()),
-				zap.Error(planErr),
-			)
-			return result
-		}
-		srcResult, err = r.srcSampler.SampleTableWithColumns(ctx, plan, compareColumns)
-	}
-
+	srcResult, err := r.sampleRows(ctx, table, r.srcSampler, r.srcMeta, compareColumns)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to sample source: %v", err)
-		return result
-	}
-
-	// Skip if no rows sampled (empty table)
-	if len(srcResult.Samples) == 0 {
-		result.Skipped = true
-		result.SkipReason = "empty table (no data)"
-		r.logger.Info("compare skipped",
-			zap.String("table", table.FullName()),
-		)
 		return result
 	}
 
@@ -812,6 +772,30 @@ func (r *Runner) compareTable(ctx context.Context, table types.TableMeta) *repor
 	}
 	comp := comparator.NewComparatorWithOptions(table.KeyColumns(), compOpts)
 	compareResult := comp.CompareSamples(srcResult.Samples, targetRows)
+	if r.cfg.Comparison.CheckTargetOnlyRows {
+		target := r.targetTable(table)
+		// 타겟 자체 통계를 사용하되 키 이름은 소스 기준을 유지한다.
+		meta, err := r.targetMeta.GetTableMeta(ctx, target.Schema, target.Name)
+		if err != nil {
+			result.Error = fmt.Sprintf("failed to read target metadata: %v", err)
+			return result
+		}
+		target.EstimatedRows = meta.EstimatedRows
+		targetSample, err := r.sampleRows(ctx, target, r.targetSampler, r.targetMeta, table.KeyColumns())
+		if err != nil {
+			result.Error = fmt.Sprintf("failed to sample target keys: %v", err)
+			return result
+		}
+		sourceKeys, err := r.sampleByKeys(ctx, r.srcSampler, table, targetSample.Samples, table.KeyColumns())
+		if err != nil {
+			result.Error = fmt.Sprintf("failed to lookup source keys: %v", err)
+			return result
+		}
+		reverse := comp.CompareSamples(sourceKeys, targetSample.Samples)
+		compareResult.MissingInSrc = append(compareResult.MissingInSrc, reverse.MissingInSrc...)
+		result.TargetRowsChecked = len(targetSample.Samples)
+		result.TargetOnlyChecked = true
+	}
 
 	// Convert to mismatches (with deduplication)
 	mismatches := comp.ToMismatches(compareResult, table, r.targetTable(table))
@@ -840,9 +824,20 @@ func (r *Runner) compareTable(ctx context.Context, table types.TableMeta) *repor
 		result.Verified = len(mismatches)
 		result.Resolved = 0
 
-		if err := r.reporter.Open(table.FullName()); err == nil {
-			r.reporter.WriteBatch(mismatches)
-			r.reporter.Close()
+		tableLogger, err := r.newTableLogger()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if err := tableLogger.Open(table.FullName()); err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if err := tableLogger.WriteBatch(mismatches); err != nil {
+			result.Error = err.Error()
+		}
+		if err := tableLogger.Close(); err != nil {
+			result.Error = appendError(result.Error, err)
 		}
 	}
 
@@ -859,8 +854,11 @@ func (r *Runner) compareTable(ctx context.Context, table types.TableMeta) *repor
 	return result
 }
 
-// createPartitionPlan creates a partition plan for sampling
-func (r *Runner) createPartitionPlan(ctx context.Context, table types.TableMeta) (*sampler.PartitionPlan, error) {
+// sampleRows는 양쪽 테이블에 동일한 표본 추출 정책을 적용한다.
+func (r *Runner) sampleRows(ctx context.Context, table types.TableMeta, reader *sampler.Sampler, meta *db.MetaQuerier, columns []string) (*sampler.TableSampleResult, error) {
+	if table.EstimatedRows <= int64(r.cfg.Comparison.SampleSize) {
+		return reader.SampleTableDirectWithColumns(ctx, table, r.cfg.Comparison.SampleSize, columns)
+	}
 	keyColumns := table.KeyColumns()
 	if len(keyColumns) == 0 {
 		return nil, fmt.Errorf("table has no key columns")
@@ -869,31 +867,41 @@ func (r *Runner) createPartitionPlan(ctx context.Context, table types.TableMeta)
 	keyColumn := keyColumns[0]
 
 	// Get min/max values for the key column
-	minVal, maxVal, err := r.srcMeta.GetMinMax(ctx, table.Schema, table.Name, keyColumns)
+	minVal, maxVal, err := meta.GetMinMax(ctx, table.Schema, table.Name, table.PhysicalColumns(keyColumns))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get min/max values: %w", err)
+	}
+	if minVal == nil || maxVal == nil {
+		return &sampler.TableSampleResult{Table: table}, nil
 	}
 
 	cfg := sampler.PartitionConfig{
 		SampleSize:        r.cfg.Comparison.SampleSize,
 		MinPartitions:     10,
 		MaxPartitions:     500,
-		MaxSamplesPerPart: 1000, // LIMIT per partition query to avoid ORDER BY RAND() performance issues
+		MaxSamplesPerPart: 1000,
 		LargeTableThresh:  1000000,
 	}
 
-	return sampler.CreatePartitionPlan(table, keyColumn, minVal, maxVal, cfg)
+	plan, err := sampler.CreatePartitionPlan(table, keyColumn, minVal, maxVal, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return reader.SampleTableWithColumns(ctx, plan, columns)
 }
 
 // sampleTargetByKeys samples target using keys from source samples
 // Uses batch queries for efficiency (1000 rows per query instead of 1 row per query)
 func (r *Runner) sampleTargetByKeys(ctx context.Context, table types.TableMeta, srcRows []types.Row, columns []string) ([]types.Row, error) {
+	return r.sampleByKeys(ctx, r.targetSampler, r.targetTable(table), srcRows, columns)
+}
+
+func (r *Runner) sampleByKeys(ctx context.Context, reader *sampler.Sampler, table types.TableMeta, srcRows []types.Row, columns []string) ([]types.Row, error) {
 	if len(srcRows) == 0 {
 		return nil, nil
 	}
 
 	keyColumns := table.KeyColumns()
-	targetTable := r.targetTable(table)
 
 	const batchSize = 1000 // MySQL IN clause safe limit
 	var allTargetRows []types.Row
@@ -924,29 +932,9 @@ func (r *Runner) sampleTargetByKeys(ctx context.Context, table types.TableMeta, 
 		}
 
 		// Batch lookup in target
-		targetRows, err := r.targetSampler.SampleByKeys(ctx, targetTable, keyValuesList, columns)
+		targetRows, err := reader.SampleByKeys(ctx, table, keyValuesList, columns)
 		if err != nil {
-			r.logger.Warn("batch target lookup failed, falling back to individual queries",
-				zap.String("table", table.FullName()),
-				zap.Int("batch_size", len(batch)),
-				zap.Error(err),
-			)
-			// Fallback to individual queries for this batch
-			for _, kv := range keyValuesList {
-				targetRow, err := r.targetSampler.SampleByKey(ctx, targetTable, kv)
-				if err != nil {
-					r.logger.Debug("failed to lookup target row",
-						zap.String("table", table.FullName()),
-						zap.Any("key", kv),
-						zap.Error(err),
-					)
-					continue
-				}
-				if targetRow != nil {
-					allTargetRows = append(allTargetRows, targetRow)
-				}
-			}
-			continue
+			return nil, err
 		}
 
 		allTargetRows = append(allTargetRows, targetRows...)

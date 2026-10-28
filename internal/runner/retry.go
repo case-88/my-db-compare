@@ -55,6 +55,7 @@ func (r *Runner) runRetryMode(ctx context.Context, summary *reporter.Summary) (*
 		parallelism = 1
 	}
 
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -103,15 +104,20 @@ func (r *Runner) runRetryMode(ctx context.Context, summary *reporter.Summary) (*
 		case err := <-errCh:
 			if err != nil {
 				wg.Wait()
-				return nil, err
+				summary.Error = err.Error()
+				for result := range resultCh {
+					summary.AddResult(result)
+				}
+				return r.finishRun(parentCtx, summary)
 			}
 		case result, ok := <-resultCh:
 			if !ok {
-				summary.Finish()
-				if err := summary.SaveJSON(r.outputDir); err != nil {
-					r.logger.Warn("failed to write summary", zap.Error(err))
+				select {
+				case err := <-errCh:
+					summary.Error = err.Error()
+				default:
 				}
-				return &Result{Summary: summary}, nil
+				return r.finishRun(parentCtx, summary)
 			}
 			summary.AddResult(result)
 		}
@@ -169,6 +175,12 @@ func (r *Runner) retryTable(
 			return nil, err
 		}
 	}
+	if opened {
+		if err := tableLogger.Close(); err != nil {
+			return nil, err
+		}
+		opened = false
+	}
 
 	result.Duration = time.Since(start)
 	r.logger.Info("compare done",
@@ -220,8 +232,7 @@ func (r *Runner) retryMismatchFile(
 		m.Table = defaultTable
 
 		if strings.TrimSpace(m.Query) == "" {
-			r.logger.Warn("mismatch record missing query, skipping", zap.String("table", defaultTable))
-			return nil
+			return fmt.Errorf("mismatch record for %s is missing its lookup query", defaultTable)
 		}
 
 		if mapped != (m.TargetQuery != "") {

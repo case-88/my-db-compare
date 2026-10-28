@@ -90,6 +90,7 @@ type Comparison struct {
 	IgnoreJSONKeyOrder        *bool  `yaml:"ignore_json_key_order" mapstructure:"ignore_json_key_order"`             // nil = true (default: compare JSON semantically)
 	IgnoreLargeColumns        *bool  `yaml:"ignore_large_columns" mapstructure:"ignore_large_columns"`               // nil = false (default: include all columns)
 	GenerateCorrectionQueries *bool  `yaml:"generate_correction_queries" mapstructure:"generate_correction_queries"` // nil = false (default: don't generate)
+	CheckTargetOnlyRows       bool   `yaml:"check_target_only_rows" mapstructure:"check_target_only_rows"`
 
 	// Full mode specific options
 	FullModeChunkSize   int `yaml:"full_mode_chunk_size" mapstructure:"full_mode_chunk_size"`   // chunk size for full mode (default: 2000)
@@ -270,6 +271,7 @@ func Load(configPath string) (*Config, error) {
 	viper.SetEnvPrefix("DBCOMPARE")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
+	viper.SetDefault("comparison.check_target_only_rows", false)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

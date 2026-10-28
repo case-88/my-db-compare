@@ -24,6 +24,8 @@ type Summary struct {
 	TotalTables     int
 	TablesCompared  int
 	TablesSkipped   int
+	TablesFailed    int
+	Error           string
 	TotalSampled    int
 	TotalMatched    int
 	TotalMismatched int
@@ -33,32 +35,35 @@ type Summary struct {
 
 // RunConfig holds the configuration used for this run
 type RunConfig struct {
-	SourceHost      string   `json:"source_host"`
-	SourcePort      int      `json:"source_port"`
-	TargetHost      string   `json:"target_host"`
-	TargetPort      int      `json:"target_port"`
-	SampleSize      int      `json:"sample_size"`
-	Parallelism     int      `json:"parallelism"`
-	IncludePatterns []string `json:"include_patterns,omitempty"`
-	ExcludePatterns []string `json:"exclude_patterns,omitempty"`
+	SourceHost          string   `json:"source_host"`
+	SourcePort          int      `json:"source_port"`
+	TargetHost          string   `json:"target_host"`
+	TargetPort          int      `json:"target_port"`
+	SampleSize          int      `json:"sample_size"`
+	Parallelism         int      `json:"parallelism"`
+	IncludePatterns     []string `json:"include_patterns,omitempty"`
+	ExcludePatterns     []string `json:"exclude_patterns,omitempty"`
+	CheckTargetOnlyRows bool     `json:"check_target_only_rows"`
 }
 
 // TableResult holds the result for a single table
 type TableResult struct {
-	Table           string        `json:"table"`
-	EstimatedRows   int64         `json:"estimated_rows"`
-	KeyColumns      []string      `json:"key_columns"`
-	Sampled         int           `json:"sampled"`
-	Matched         int           `json:"matched"`
-	MissingInTarget int           `json:"missing_in_target"`
-	MissingInSource int           `json:"missing_in_source"`
-	Different       int           `json:"different"`
-	Verified        int           `json:"verified"`
-	Resolved        int           `json:"resolved"`
-	Duration        time.Duration `json:"duration"`
-	Error           string        `json:"error,omitempty"`
-	Skipped         bool          `json:"skipped"`
-	SkipReason      string        `json:"skip_reason,omitempty"`
+	Table             string        `json:"table"`
+	EstimatedRows     int64         `json:"estimated_rows"`
+	KeyColumns        []string      `json:"key_columns"`
+	Sampled           int           `json:"sampled"`
+	Matched           int           `json:"matched"`
+	MissingInTarget   int           `json:"missing_in_target"`
+	MissingInSource   int           `json:"missing_in_source"`
+	Different         int           `json:"different"`
+	Verified          int           `json:"verified"`
+	Resolved          int           `json:"resolved"`
+	Duration          time.Duration `json:"duration"`
+	Error             string        `json:"error,omitempty"`
+	Skipped           bool          `json:"skipped"`
+	SkipReason        string        `json:"skip_reason,omitempty"`
+	TargetRowsChecked int           `json:"target_rows_checked"`
+	TargetOnlyChecked bool          `json:"target_only_checked"`
 }
 
 // NewSummary creates a new Summary
@@ -79,7 +84,11 @@ func (s *Summary) AddResult(result *TableResult) {
 	if result.Skipped {
 		s.TablesSkipped++
 	} else {
-		s.TablesCompared++
+		if result.Error != "" {
+			s.TablesFailed++
+		} else {
+			s.TablesCompared++
+		}
 		s.TotalSampled += result.Sampled
 		s.TotalMatched += result.Matched
 		s.TotalMismatched += result.MissingInTarget + result.MissingInSource + result.Different
@@ -113,7 +122,7 @@ func (s *Summary) Duration() time.Duration {
 // MatchRate returns the overall match rate as a percentage
 func (s *Summary) MatchRate() float64 {
 	if s.TotalSampled == 0 {
-		return 100.0
+		return 0
 	}
 	return float64(s.TotalMatched) / float64(s.TotalSampled) * 100
 }
@@ -121,6 +130,44 @@ func (s *Summary) MatchRate() float64 {
 // HasMismatches returns true if any mismatches were found
 func (s *Summary) HasMismatches() bool {
 	return s.TotalVerified > 0
+}
+
+func (s *Summary) HasErrors() bool {
+	return s.Error != "" || s.TablesFailed > 0
+}
+
+// Incomplete는 미검증 테이블이 있는 실행을 일치 판정과 구분한다.
+func (s *Summary) Incomplete() bool {
+	if s.HasErrors() || s.TablesSkipped > 0 {
+		return true
+	}
+	if s.RunMode != "retry" && s.Config != nil && s.Config.CheckTargetOnlyRows {
+		for _, result := range s.Results {
+			if !result.TargetOnlyChecked {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Summary) Status() string {
+	switch {
+	case s.Incomplete():
+		return "INCOMPLETE"
+	case s.EndTime.IsZero():
+		return "RUNNING"
+	case s.HasMismatches():
+		return "MISMATCHES FOUND"
+	case s.RunMode == "retry":
+		return "RETRY ROWS MATCHED"
+	case s.RunMode == "sample":
+		return "SAMPLED ROWS MATCHED"
+	case s.Config != nil && s.Config.CheckTargetOnlyRows:
+		return "ALL MATCHED"
+	default:
+		return "SOURCE ROWS MATCHED"
+	}
 }
 
 // Print prints the summary to stdout
@@ -147,6 +194,7 @@ func (s *Summary) Fprint(w io.Writer) {
 	fmt.Fprintf(w, "    Total:        %d\n", s.TotalTables)
 	fmt.Fprintf(w, "    Compared:     %d\n", s.TablesCompared)
 	fmt.Fprintf(w, "    Skipped:      %d\n", s.TablesSkipped)
+	fmt.Fprintf(w, "    Failed:       %d\n", s.TablesFailed)
 	fmt.Fprintln(w)
 
 	// Comparison stats
@@ -163,10 +211,23 @@ func (s *Summary) Fprint(w io.Writer) {
 	fmt.Fprintln(w)
 
 	// Status
-	if s.HasMismatches() {
-		fmt.Fprintln(w, "  Status:         ❌ MISMATCHES FOUND")
-	} else {
-		fmt.Fprintln(w, "  Status:         ✅ ALL MATCHED")
+	fmt.Fprintf(w, "  Status:         %s\n", s.Status())
+	if s.RunMode != "retry" {
+		if s.Config == nil || !s.Config.CheckTargetOnlyRows {
+			fmt.Fprintln(w, "  Target-only rows: NOT CHECKED")
+		} else if s.RunMode == "sample" {
+			fmt.Fprintln(w, "  Target-only rows: sampled keys only (see per-table completion)")
+		} else {
+			fmt.Fprintln(w, "  Target-only rows: full key scan (see per-table completion)")
+		}
+	}
+	if s.Error != "" {
+		fmt.Fprintf(w, "  Error:          %s\n", s.Error)
+	}
+	for _, result := range s.Results {
+		if result.Error != "" {
+			fmt.Fprintf(w, "  Unverified:     %s: %s\n", result.Table, result.Error)
+		}
 	}
 
 	fmt.Fprintln(w)
@@ -246,6 +307,9 @@ func (s *Summary) ToJSON() ([]byte, error) {
 		TotalTables     int            `json:"total_tables"`
 		TablesCompared  int            `json:"tables_compared"`
 		TablesSkipped   int            `json:"tables_skipped"`
+		TablesFailed    int            `json:"tables_failed"`
+		Error           string         `json:"error,omitempty"`
+		Status          string         `json:"status"`
 		TotalSampled    int            `json:"total_sampled"`
 		TotalMatched    int            `json:"total_matched"`
 		TotalMismatched int            `json:"total_mismatched"`
@@ -262,6 +326,9 @@ func (s *Summary) ToJSON() ([]byte, error) {
 		TotalTables:     s.TotalTables,
 		TablesCompared:  s.TablesCompared,
 		TablesSkipped:   s.TablesSkipped,
+		TablesFailed:    s.TablesFailed,
+		Error:           s.Error,
+		Status:          s.Status(),
 		TotalSampled:    s.TotalSampled,
 		TotalMatched:    s.TotalMatched,
 		TotalMismatched: s.TotalMismatched,

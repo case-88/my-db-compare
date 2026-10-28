@@ -54,22 +54,17 @@ func (s *Sampler) SamplePartition(ctx context.Context, table types.TableMeta, pa
 		return &SampleResult{Partition: partition, Rows: nil}, nil
 	}
 
-	keyColumn := table.KeyColumns()[0] // Use first key column for partitioning
+	keyColumn := table.PhysicalColumn(table.KeyColumns()[0])
 
 	// Build column list
-	colList := buildColumnList(columns)
+	colList := table.SelectList(columns)
 
-	// Build query with partition range
-	// Format: SELECT cols FROM table WHERE key >= min AND key < max ORDER BY key_column LIMIT n
-	// Note: ORDER BY key_column instead of RAND() for performance optimization
-	// - RAND() causes full table scan + random value calculation for each row
-	// - Partitions are already distributed across PK ranges, so overall sampling is distributed
+	// 구간 내부를 무작위로 추출한다. LIMIT과 별개로 구간 스캔 비용이 발생한다.
 	query := fmt.Sprintf(
-		"SELECT %s FROM `%s`.`%s` WHERE `%s` >= ? AND `%s` <= ? ORDER BY `%s` LIMIT ?",
+		"SELECT %s FROM `%s`.`%s` WHERE `%s` >= ? AND `%s` <= ? ORDER BY RAND() LIMIT ?",
 		colList,
 		table.Schema,
 		table.Name,
-		keyColumn,
 		keyColumn,
 		keyColumn,
 	)
@@ -169,7 +164,7 @@ func (s *Sampler) SampleTableWithColumns(ctx context.Context, plan *PartitionPla
 				zap.Int("partition", partition.Index),
 				zap.Error(err),
 			)
-			continue // Continue with other partitions
+			return nil, fmt.Errorf("partition %d failed: %w", partition.Index, err)
 		}
 
 		allSamples = append(allSamples, result.Rows...)
@@ -292,14 +287,12 @@ func (s *Sampler) SampleTableWithColumnsParallel(ctx context.Context, plan *Part
 		zap.Int("samples", len(allSamples)),
 	)
 
-	// If all partitions failed, return the error (prefer context error)
-	if successCount == 0 {
-		if ctxErr != nil {
-			return nil, ctxErr
-		}
-		if firstErr != nil {
-			return nil, fmt.Errorf("all partitions failed: %w", firstErr)
-		}
+	// 일부 성공도 전체 표본 추출 성공으로 처리하지 않는다.
+	if ctxErr != nil {
+		return nil, ctxErr
+	}
+	if firstErr != nil {
+		return nil, fmt.Errorf("partition sampling failed: %w", firstErr)
 	}
 
 	return &TableSampleResult{
@@ -323,29 +316,8 @@ func (s *Sampler) SampleTableDirect(ctx context.Context, table types.TableMeta, 
 // SampleTableDirectWithColumns extracts random samples with specified columns
 // Useful for excluding large columns (TEXT, BLOB, JSON) from comparison
 func (s *Sampler) SampleTableDirectWithColumns(ctx context.Context, table types.TableMeta, sampleSize int, columns []string) (*TableSampleResult, error) {
-	colList := buildColumnList(columns)
-
-	// Use primary key for ordering if available, otherwise fall back to RAND()
-	// PK ordering is much faster than RAND() which requires full table scan
-	var query string
-	keyColumns := table.KeyColumns()
-	if len(keyColumns) > 0 {
-		query = fmt.Sprintf(
-			"SELECT %s FROM `%s`.`%s` ORDER BY `%s` LIMIT ?",
-			colList,
-			table.Schema,
-			table.Name,
-			keyColumns[0],
-		)
-	} else {
-		// Fallback to RAND() only when no key column is available
-		query = fmt.Sprintf(
-			"SELECT %s FROM `%s`.`%s` ORDER BY RAND() LIMIT ?",
-			colList,
-			table.Schema,
-			table.Name,
-		)
-	}
+	query := fmt.Sprintf("SELECT %s FROM `%s`.`%s` ORDER BY RAND() LIMIT ?",
+		table.SelectList(columns), table.Schema, table.Name)
 
 	s.logger.Debug("direct sampling",
 		zap.String("table", table.FullName()),
@@ -441,7 +413,7 @@ func (s *Sampler) SampleByKey(ctx context.Context, table types.TableMeta, keyVal
 	}
 
 	if !rows.Next() {
-		return nil, nil // Row not found
+		return nil, rows.Err()
 	}
 
 	values := make([]interface{}, len(colNames))
