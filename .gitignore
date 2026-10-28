@@ -1,0 +1,19 @@
+# Build output
+build/
+*.out
+coverage.html
+
+# Run results (may contain real row data)
+results/
+output/
+test-output/
+
+# Local configs with real connection details
+config.local.yaml
+*.local.yaml
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

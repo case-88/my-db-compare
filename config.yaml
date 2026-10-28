@@ -1,0 +1,56 @@
+# my-db-compare example configuration (all options)
+# Options left out fall back to the defaults noted in the comments.
+# Every option can also be set through an environment variable,
+# e.g. DBCOMPARE_SOURCE_HOST, DBCOMPARE_COMPARISON_SAMPLE_SIZE.
+
+# Source database (MySQL compatible)
+source:
+  host: source-mysql.example.com
+  port: 3306                      # default: 3306
+  user: readonly
+  password: ${SOURCE_DB_PASSWORD} # "${VAR}" or "$VAR" is read from the environment
+  database: mysql                 # used only to connect; tables are chosen by tables.include
+
+# Target database (MySQL compatible, e.g. TiDB)
+target:
+  host: target-tidb.example.com
+  port: 4000                      # default: 3306
+  user: readonly
+  password: ${TARGET_DB_PASSWORD}
+  database: mysql
+
+comparison:
+  mode: sampling                  # sampling | full (default: sampling); the CLI subcommand takes precedence
+  sample_size: 1000               # [sampling] rows sampled per table (default: 1000)
+  parallelism: 5                  # tables processed at the same time (default: 5)
+
+  ignore_datetime_precision: true    # true: compare datetimes to the second (default: true)
+  ignore_zero_datetime: true         # true: treat '0000-00-00 00:00:00' as NULL (default: true)
+  ignore_json_key_order: true        # true: compare JSON by meaning, ignoring key order (default: true)
+  ignore_large_columns: false        # true: skip TEXT/BLOB/JSON columns (default: false)
+  generate_correction_queries: false # true: write UPDATE/INSERT/DELETE queries that fix mismatches (default: false)
+
+  # Full mode only
+  full_mode_chunk_size: 2000      # rows read per query (default: 2000)
+  full_mode_delay_ms: 10          # pause between chunks in ms (default: 10)
+  full_mode_parallelism: 4        # primary-key partitions processed in parallel within one table (default: 4)
+
+# Tables to compare, as "database.table" patterns; * matches any text.
+# An empty include list means every non-system database.
+tables:
+  include:
+    - "app.*"                     # every table in the app database
+    - "shop_*.*"                  # every table in databases starting with shop_
+    - "*.users"                   # the users table in every database
+  exclude:
+    - "mysql.*"
+    - "information_schema.*"
+    - "performance_schema.*"
+    - "sys.*"
+    - "*.*_backup"                # tables ending with _backup
+    - "app.schema_migrations"
+
+output:
+  format: jsonl                   # jsonl | json | text (default: jsonl)
+  path: ./results                 # results directory (default: ./results)
+  log_level: info                 # debug | info | warn | error (default: info)
