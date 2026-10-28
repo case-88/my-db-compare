@@ -318,3 +318,22 @@ func TestBuildCorrectionQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestTableMeta_PhysicalColumn(t *testing.T) {
+	plain := TableMeta{Schema: "app", Name: "users"}
+	if got := plain.PhysicalColumn("name"); got != "name" {
+		t.Errorf("PhysicalColumn without map = %q, want %q", got, "name")
+	}
+
+	mapped := TableMeta{ColumnMap: map[string]string{"name": "full_name"}}
+	tests := map[string]string{
+		"name":  "full_name",
+		"Name":  "full_name",
+		"email": "email",
+	}
+	for col, want := range tests {
+		if got := mapped.PhysicalColumn(col); got != want {
+			t.Errorf("PhysicalColumn(%q) = %q, want %q", col, got, want)
+		}
+	}
+}

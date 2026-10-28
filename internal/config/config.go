@@ -16,6 +16,47 @@ type Config struct {
 	Comparison Comparison     `yaml:"comparison" mapstructure:"comparison"`
 	Tables     TableFilter    `yaml:"tables" mapstructure:"tables"`
 	Output     Output         `yaml:"output" mapstructure:"output"`
+	Mappings   []TableMapping `yaml:"mappings" mapstructure:"mappings"`
+}
+
+// TableMapping pairs a source table with a target table that has a different
+// name or different column names. Columns not listed keep the same name.
+type TableMapping struct {
+	Source  string            `yaml:"source" mapstructure:"source"`   // source "database.table"
+	Target  string            `yaml:"target" mapstructure:"target"`   // target "database.table"
+	Columns map[string]string `yaml:"columns" mapstructure:"columns"` // source column -> target column
+}
+
+// ColumnMap returns the column mapping with lowercase source column keys
+func (m TableMapping) ColumnMap() map[string]string {
+	if len(m.Columns) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(m.Columns))
+	for src, target := range m.Columns {
+		result[strings.ToLower(src)] = target
+	}
+	return result
+}
+
+// SplitTableName splits "database.table" into its parts.
+// Wildcards are not allowed.
+func SplitTableName(name string) (schema, table string, ok bool) {
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(name, "*") {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// MappingFor returns the mapping whose source is the given "database.table", or nil
+func (c *Config) MappingFor(source string) *TableMapping {
+	for i := range c.Mappings {
+		if strings.EqualFold(c.Mappings[i].Source, source) {
+			return &c.Mappings[i]
+		}
+	}
+	return nil
 }
 
 // CompareMode represents the comparison mode
@@ -270,8 +311,44 @@ func (c *Config) ValidateForMode(runMode string) error {
 			return fmt.Errorf("parallelism must be at least 1")
 		}
 	}
+	if err := c.validateMappings(runMode); err != nil {
+		return err
+	}
 	// Note: database field is only for connection.
 	// If include patterns are empty, all user databases will be scanned.
+	return nil
+}
+
+func (c *Config) validateMappings(runMode string) error {
+	if len(c.Mappings) == 0 {
+		return nil
+	}
+	if runMode != "sample" {
+		return fmt.Errorf("mappings are only supported in sample mode")
+	}
+	if c.Comparison.ShouldGenerateCorrectionQueries() {
+		return fmt.Errorf("generate_correction_queries is not supported with mappings yet")
+	}
+
+	seen := make(map[string]bool)
+	for _, m := range c.Mappings {
+		if _, _, ok := SplitTableName(m.Source); !ok {
+			return fmt.Errorf("mapping source %q must be \"database.table\" without wildcards", m.Source)
+		}
+		if _, _, ok := SplitTableName(m.Target); !ok {
+			return fmt.Errorf("mapping target %q must be \"database.table\" without wildcards", m.Target)
+		}
+		key := strings.ToLower(m.Source)
+		if seen[key] {
+			return fmt.Errorf("mapping source %q is listed more than once", m.Source)
+		}
+		seen[key] = true
+		for src, target := range m.Columns {
+			if src == "" || target == "" {
+				return fmt.Errorf("mapping %q has an empty column name", m.Source)
+			}
+		}
+	}
 	return nil
 }
 
@@ -303,6 +380,11 @@ func (c *Config) GetSchemas() []string {
 			return nil
 		}
 		schemas[dbPattern] = struct{}{}
+	}
+	for _, m := range c.Mappings {
+		if schema, _, ok := SplitTableName(m.Source); ok {
+			schemas[schema] = struct{}{}
+		}
 	}
 
 	result := make([]string, 0, len(schemas))

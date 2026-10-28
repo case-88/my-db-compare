@@ -402,7 +402,7 @@ func (s *Sampler) SampleByKey(ctx context.Context, table types.TableMeta, keyVal
 		columns[i] = col.Name
 	}
 
-	colList := buildColumnList(columns)
+	colList := buildSelectList(table, columns)
 
 	// Build WHERE clause for key columns
 	keyColumns := table.KeyColumns()
@@ -413,7 +413,7 @@ func (s *Sampler) SampleByKey(ctx context.Context, table types.TableMeta, keyVal
 	whereParts := make([]string, len(keyColumns))
 	args := make([]interface{}, len(keyColumns))
 	for i, col := range keyColumns {
-		whereParts[i] = fmt.Sprintf("`%s` = ?", col)
+		whereParts[i] = fmt.Sprintf("`%s` = ?", table.PhysicalColumn(col))
 		val, ok := keyValues[col]
 		if !ok {
 			return nil, fmt.Errorf("missing key value for column: %s", col)
@@ -470,7 +470,7 @@ func (s *Sampler) SampleByKeys(ctx context.Context, table types.TableMeta, keyVa
 		return nil, nil
 	}
 
-	colList := buildColumnList(columns)
+	colList := buildSelectList(table, columns)
 
 	keyColumns := table.KeyColumns()
 	if len(keyColumns) == 0 {
@@ -484,6 +484,7 @@ func (s *Sampler) SampleByKeys(ctx context.Context, table types.TableMeta, keyVa
 	if len(keyColumns) == 1 {
 		// Single column PK: WHERE pk IN (?, ?, ?)
 		keyCol := keyColumns[0]
+		physicalKeyCol := table.PhysicalColumn(keyCol)
 		placeholders := make([]string, len(keyValuesList))
 		args = make([]interface{}, len(keyValuesList))
 
@@ -497,14 +498,14 @@ func (s *Sampler) SampleByKeys(ctx context.Context, table types.TableMeta, keyVa
 			colList,
 			table.Schema,
 			table.Name,
-			keyCol,
+			physicalKeyCol,
 			strings.Join(placeholders, ", "),
 		)
 	} else {
 		// Composite PK: WHERE (pk1, pk2) IN ((?, ?), (?, ?))
 		colParts := make([]string, len(keyColumns))
 		for i, col := range keyColumns {
-			colParts[i] = fmt.Sprintf("`%s`", col)
+			colParts[i] = fmt.Sprintf("`%s`", table.PhysicalColumn(col))
 		}
 
 		tuplePlaceholders := make([]string, len(keyValuesList))
@@ -576,6 +577,26 @@ func buildColumnList(columns []string) string {
 		quoted[i] = fmt.Sprintf("`%s`", col)
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// buildSelectList builds a select list for the given columns. A column stored
+// under a different name in this table is read with an alias, so rows always
+// use the requested column names.
+func buildSelectList(table types.TableMeta, columns []string) string {
+	if len(columns) == 0 {
+		return "*"
+	}
+
+	parts := make([]string, len(columns))
+	for i, col := range columns {
+		physical := table.PhysicalColumn(col)
+		if physical == col {
+			parts[i] = fmt.Sprintf("`%s`", col)
+		} else {
+			parts[i] = fmt.Sprintf("`%s` AS `%s`", physical, col)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ExtractKeyValues extracts key column values from a row

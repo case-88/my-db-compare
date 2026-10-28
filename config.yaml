@@ -50,6 +50,21 @@ tables:
     - "*.*_backup"                # tables ending with _backup
     - "app.schema_migrations"
 
+# Compare a source table with a target table that has a different name or
+# different column names (sample mode only for now).
+# Mapped tables are compared even when tables.include/exclude would skip them.
+# Columns not listed are assumed to have the same name on both sides,
+# including key columns: rename a key column here if its name differs.
+# Uncomment and edit to use.
+# mappings:
+#   - source: app.users             # source "database.table"
+#     target: app_v2.members        # target "database.table"
+#     columns:                      # source column: target column
+#       id: member_id
+#       name: full_name
+#   - source: shop.orders
+#     target: shop.orders_new       # table renamed, columns unchanged
+
 output:
   format: jsonl                   # jsonl | json | text (default: jsonl)
   path: ./results                 # results directory (default: ./results)
