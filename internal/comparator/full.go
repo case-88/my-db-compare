@@ -111,11 +111,13 @@ type ChunkResult struct {
 type MismatchHandler func(mismatches []types.Mismatch) error
 
 // CompareTable performs full comparison of a table
+// target is the table to read on the target side (differs only for mappings)
 // Progress is reported via progressCh (can be nil)
 // Mismatches are passed to handler for immediate processing
 func (fc *FullComparer) CompareTable(
 	ctx context.Context,
 	table types.TableMeta,
+	target types.TableMeta,
 	columns []string,
 	handler MismatchHandler,
 	progressCh chan<- *FullCompareProgress,
@@ -184,7 +186,7 @@ func (fc *FullComparer) CompareTable(
 		wg.Add(1)
 		go func(p PartitionRange) {
 			defer wg.Done()
-			pr := fc.comparePartition(ctx, table, keyColumn, columns, p, handler, progress)
+			pr := fc.comparePartition(ctx, table, target, keyColumn, columns, p, handler, progress)
 			resultCh <- pr
 		}(partition)
 	}
@@ -230,6 +232,7 @@ type partitionResult struct {
 func (fc *FullComparer) comparePartition(
 	ctx context.Context,
 	table types.TableMeta,
+	target types.TableMeta,
 	keyColumn string,
 	columns []string,
 	partition PartitionRange,
@@ -268,7 +271,7 @@ func (fc *FullComparer) comparePartition(
 		}
 
 		// Fetch same keys from target
-		targetRows, err := fc.fetchByKeys(ctx, fc.targetConn, table, columns, srcRows, table.KeyColumns())
+		targetRows, err := fc.fetchByKeys(ctx, fc.targetConn, target, columns, srcRows, table.KeyColumns())
 		if err != nil {
 			result.Error = fmt.Errorf("failed to fetch target rows: %w", err)
 			return result
@@ -286,7 +289,7 @@ func (fc *FullComparer) comparePartition(
 
 		// Handle mismatches
 		if len(compareResult.MissingInTarget) > 0 || len(compareResult.MissingInSrc) > 0 || len(compareResult.Different) > 0 {
-			mismatches := comp.ToMismatches(compareResult, table.FullName())
+			mismatches := comp.ToMismatches(compareResult, table, target)
 
 			// Count by type
 			for _, m := range mismatches {
@@ -456,7 +459,7 @@ func (fc *FullComparer) fetchByKeys(
 		return nil, nil
 	}
 
-	colList := buildColumnListForQuery(columns)
+	colList := table.SelectList(columns)
 
 	// Build key values list
 	keyValuesList := make([]map[string]interface{}, len(srcRows))
@@ -482,14 +485,14 @@ func (fc *FullComparer) fetchByKeys(
 		}
 		query = fmt.Sprintf(
 			"SELECT %s FROM `%s`.`%s` WHERE `%s` IN (%s)",
-			colList, table.Schema, table.Name, keyCol,
+			colList, table.Schema, table.Name, table.PhysicalColumn(keyCol),
 			joinStrings(placeholders, ", "),
 		)
 	} else {
 		// Composite PK
 		colParts := make([]string, len(keyColumns))
 		for i, col := range keyColumns {
-			colParts[i] = fmt.Sprintf("`%s`", col)
+			colParts[i] = fmt.Sprintf("`%s`", table.PhysicalColumn(col))
 		}
 
 		tuplePlaceholders := make([]string, len(keyValuesList))

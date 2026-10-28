@@ -622,26 +622,3 @@ func TestDefaultPartitionParallelism(t *testing.T) {
 		t.Errorf("DefaultPartitionParallelism should not exceed connection pool size, got %d", DefaultPartitionParallelism)
 	}
 }
-
-func TestBuildSelectList(t *testing.T) {
-	plain := types.TableMeta{}
-	mapped := types.TableMeta{ColumnMap: map[string]string{"id": "member_id", "name": "full_name"}}
-
-	tests := []struct {
-		name    string
-		table   types.TableMeta
-		columns []string
-		want    string
-	}{
-		{"empty columns", plain, nil, "*"},
-		{"no mapping", plain, []string{"id", "name"}, "`id`, `name`"},
-		{"mapped columns are aliased", mapped, []string{"id", "name", "email"}, "`member_id` AS `id`, `full_name` AS `name`, `email`"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := buildSelectList(tt.table, tt.columns); got != tt.want {
-				t.Errorf("buildSelectList() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

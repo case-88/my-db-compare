@@ -337,3 +337,47 @@ func TestTableMeta_PhysicalColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestTableMeta_MappedQueries(t *testing.T) {
+	plain := TableMeta{Schema: "app", Name: "users"}
+	mapped := TableMeta{
+		Schema:    "app_v2",
+		Name:      "members",
+		Columns:   []ColumnMeta{{Name: "id"}, {Name: "name"}, {Name: "email"}},
+		ColumnMap: map[string]string{"id": "member_id", "name": "full_name"},
+	}
+	pk := map[string]interface{}{"id": 7}
+	src := Row{"id": 7, "name": "Kim", "email": "k@example.com"}
+
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"select list without mapping", plain.SelectList([]string{"id", "name"}), "`id`, `name`"},
+		{"select list without columns", plain.SelectList(nil), "*"},
+		{"select list aliases mapped columns", mapped.SelectList([]string{"id", "name", "email"}),
+			"`member_id` AS `id`, `full_name` AS `name`, `email`"},
+		{"select list expands all columns when mapped", mapped.SelectList(nil),
+			"`member_id` AS `id`, `full_name` AS `name`, `email`"},
+		{"lookup on mapped table", mapped.LookupQuery(pk, nil),
+			"SELECT `member_id` AS `id`, `full_name` AS `name`, `email` FROM `app_v2`.`members` WHERE `member_id` = 7;"},
+		{"lookup with diff columns", mapped.LookupQuery(pk, []string{"name"}),
+			"SELECT `member_id` AS `id`, `full_name` AS `name` FROM `app_v2`.`members` WHERE `member_id` = 7;"},
+		{"update uses target names", mapped.CorrectionQuery(MismatchDataDiff, pk, src, []string{"name"}),
+			"UPDATE `app_v2`.`members` SET `full_name` = 'Kim' WHERE `member_id` = 7;"},
+		{"insert uses target names", mapped.CorrectionQuery(MismatchMissingTarget, pk, src, nil),
+			"INSERT INTO `app_v2`.`members` (`email`, `full_name`, `member_id`) VALUES ('k@example.com', 'Kim', 7);"},
+		{"delete uses target names", mapped.CorrectionQuery(MismatchMissingSource, pk, nil, nil),
+			"DELETE FROM `app_v2`.`members` WHERE `member_id` = 7;"},
+		{"unmapped correction is unchanged", plain.CorrectionQuery(MismatchMissingSource, pk, nil, nil),
+			BuildDeleteQuery("app.users", pk)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("got  %s\nwant %s", tt.got, tt.want)
+			}
+		})
+	}
+}

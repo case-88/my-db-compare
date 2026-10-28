@@ -402,7 +402,7 @@ func (s *Sampler) SampleByKey(ctx context.Context, table types.TableMeta, keyVal
 		columns[i] = col.Name
 	}
 
-	colList := buildSelectList(table, columns)
+	colList := table.SelectList(columns)
 
 	// Build WHERE clause for key columns
 	keyColumns := table.KeyColumns()
@@ -470,7 +470,7 @@ func (s *Sampler) SampleByKeys(ctx context.Context, table types.TableMeta, keyVa
 		return nil, nil
 	}
 
-	colList := buildSelectList(table, columns)
+	colList := table.SelectList(columns)
 
 	keyColumns := table.KeyColumns()
 	if len(keyColumns) == 0 {
@@ -577,26 +577,6 @@ func buildColumnList(columns []string) string {
 		quoted[i] = fmt.Sprintf("`%s`", col)
 	}
 	return strings.Join(quoted, ", ")
-}
-
-// buildSelectList builds a select list for the given columns. A column stored
-// under a different name in this table is read with an alias, so rows always
-// use the requested column names.
-func buildSelectList(table types.TableMeta, columns []string) string {
-	if len(columns) == 0 {
-		return "*"
-	}
-
-	parts := make([]string, len(columns))
-	for i, col := range columns {
-		physical := table.PhysicalColumn(col)
-		if physical == col {
-			parts[i] = fmt.Sprintf("`%s`", col)
-		} else {
-			parts[i] = fmt.Sprintf("`%s` AS `%s`", physical, col)
-		}
-	}
-	return strings.Join(parts, ", ")
 }
 
 // ExtractKeyValues extracts key column values from a row

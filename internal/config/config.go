@@ -311,7 +311,7 @@ func (c *Config) ValidateForMode(runMode string) error {
 			return fmt.Errorf("parallelism must be at least 1")
 		}
 	}
-	if err := c.validateMappings(runMode); err != nil {
+	if err := c.validateMappings(); err != nil {
 		return err
 	}
 	// Note: database field is only for connection.
@@ -319,17 +319,10 @@ func (c *Config) ValidateForMode(runMode string) error {
 	return nil
 }
 
-func (c *Config) validateMappings(runMode string) error {
+func (c *Config) validateMappings() error {
 	if len(c.Mappings) == 0 {
 		return nil
 	}
-	if runMode != "sample" {
-		return fmt.Errorf("mappings are only supported in sample mode")
-	}
-	if c.Comparison.ShouldGenerateCorrectionQueries() {
-		return fmt.Errorf("generate_correction_queries is not supported with mappings yet")
-	}
-
 	seen := make(map[string]bool)
 	for _, m := range c.Mappings {
 		if _, _, ok := SplitTableName(m.Source); !ok {
