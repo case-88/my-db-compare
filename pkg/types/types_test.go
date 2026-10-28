@@ -274,40 +274,40 @@ func TestBuildDeleteQuery(t *testing.T) {
 
 func TestBuildCorrectionQuery(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		mismatchType MismatchType
-		table       string
-		pk          map[string]interface{}
-		sourceData  Row
-		diffColumns []string
-		contains    string
+		table        string
+		pk           map[string]interface{}
+		sourceData   Row
+		diffColumns  []string
+		contains     string
 	}{
 		{
-			name:        "data diff generates UPDATE",
+			name:         "data diff generates UPDATE",
 			mismatchType: MismatchDataDiff,
-			table:       "mydb.users",
-			pk:          map[string]interface{}{"id": 1},
-			sourceData:  Row{"id": 1, "status": "active"},
-			diffColumns: []string{"status"},
-			contains:    "UPDATE",
+			table:        "mydb.users",
+			pk:           map[string]interface{}{"id": 1},
+			sourceData:   Row{"id": 1, "status": "active"},
+			diffColumns:  []string{"status"},
+			contains:     "UPDATE",
 		},
 		{
-			name:        "missing in target generates INSERT",
+			name:         "missing in target generates INSERT",
 			mismatchType: MismatchMissingTarget,
-			table:       "mydb.users",
-			pk:          map[string]interface{}{"id": 1},
-			sourceData:  Row{"id": 1, "name": "Test"},
-			diffColumns: nil,
-			contains:    "INSERT",
+			table:        "mydb.users",
+			pk:           map[string]interface{}{"id": 1},
+			sourceData:   Row{"id": 1, "name": "Test"},
+			diffColumns:  nil,
+			contains:     "INSERT",
 		},
 		{
-			name:        "missing in source generates DELETE",
+			name:         "missing in source generates DELETE",
 			mismatchType: MismatchMissingSource,
-			table:       "mydb.users",
-			pk:          map[string]interface{}{"id": 1},
-			sourceData:  nil,
-			diffColumns: nil,
-			contains:    "DELETE",
+			table:        "mydb.users",
+			pk:           map[string]interface{}{"id": 1},
+			sourceData:   nil,
+			diffColumns:  nil,
+			contains:     "DELETE",
 		},
 	}
 

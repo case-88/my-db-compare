@@ -15,12 +15,12 @@ func init() {
 
 // PartitionConfig holds partition calculation configuration
 type PartitionConfig struct {
-	SampleSize           int   // Total number of samples to collect
-	MinPartitions        int   // Minimum number of partitions (default: 10)
-	MaxPartitions        int   // Maximum number of partitions (default: 300)
-	MaxSamplesPerPart    int   // Maximum samples per partition (default: 1000)
-	LargeTableThresh     int64 // Row count threshold for large table adjustment (default: 1M)
-	DisableRandomness    bool  // Disable partition count randomness (for testing)
+	SampleSize        int   // Total number of samples to collect
+	MinPartitions     int   // Minimum number of partitions (default: 10)
+	MaxPartitions     int   // Maximum number of partitions (default: 300)
+	MaxSamplesPerPart int   // Maximum samples per partition (default: 1000)
+	LargeTableThresh  int64 // Row count threshold for large table adjustment (default: 1M)
+	DisableRandomness bool  // Disable partition count randomness (for testing)
 }
 
 // DefaultPartitionConfig returns default partition configuration
@@ -29,7 +29,7 @@ func DefaultPartitionConfig() PartitionConfig {
 		SampleSize:        10000,
 		MinPartitions:     10,
 		MaxPartitions:     300,
-		MaxSamplesPerPart: 1000, // LIMIT per partition query
+		MaxSamplesPerPart: 1000,    // LIMIT per partition query
 		LargeTableThresh:  1000000, // 1M rows
 	}
 }
@@ -287,7 +287,7 @@ func CreateTimePartitions(minVal, maxVal time.Time, numPartitions int, samplesPe
 			// Last partition includes all remaining values
 			partitions[i].MaxValue = maxVal
 		} else {
-			partitions[i].MaxValue = minVal.Add(time.Duration(i+1)*partitionDuration).Add(-time.Nanosecond)
+			partitions[i].MaxValue = minVal.Add(time.Duration(i+1) * partitionDuration).Add(-time.Nanosecond)
 		}
 
 		if i < len(samplesPerPartition) {

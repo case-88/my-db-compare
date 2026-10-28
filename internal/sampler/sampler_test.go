@@ -219,8 +219,8 @@ func TestSampler_SamplePartition(t *testing.T) {
 
 	partition := Partition{
 		Index:    0,
-		MinValue: "%",  // Wildcard host
-		MaxValue: "z",  // Up to 'z'
+		MinValue: "%", // Wildcard host
+		MaxValue: "z", // Up to 'z'
 		Samples:  3,
 	}
 
