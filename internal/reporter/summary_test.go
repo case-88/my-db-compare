@@ -55,7 +55,7 @@ func TestSummary_MatchRate(t *testing.T) {
 	s := NewSummary()
 
 	// No samples yet
-	assert.Equal(t, 100.0, s.MatchRate())
+	assert.Equal(t, 0.0, s.MatchRate())
 
 	s.AddResult(&TableResult{
 		Sampled: 100,
@@ -127,7 +127,7 @@ func TestSummary_Print(t *testing.T) {
 	assert.Contains(t, output, "COMPARISON SUMMARY")
 	assert.Contains(t, output, "testdb.users")
 	assert.Contains(t, output, "1000")
-	assert.Contains(t, output, "MISMATCHES FOUND")
+	assert.Contains(t, output, "INCOMPLETE")
 }
 
 func TestSummary_PrintAllMatched(t *testing.T) {
@@ -144,7 +144,8 @@ func TestSummary_PrintAllMatched(t *testing.T) {
 	s.Fprint(&buf)
 
 	output := buf.String()
-	assert.Contains(t, output, "ALL MATCHED")
+	assert.Contains(t, output, "SOURCE ROWS MATCHED")
+	assert.Contains(t, output, "Target-only rows: NOT CHECKED")
 }
 
 func TestSummary_PrintSkipped(t *testing.T) {

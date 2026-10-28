@@ -3,6 +3,7 @@ package comparator
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -158,12 +159,12 @@ func (h *Hasher) writeValue(hasher *xxhash.Digest, val interface{}) {
 
 	case float32:
 		buf := make([]byte, 4)
-		binary.BigEndian.PutUint32(buf, uint32(v))
+		binary.BigEndian.PutUint32(buf, math.Float32bits(v))
 		hasher.Write(buf)
 
 	case float64:
 		buf := make([]byte, 8)
-		binary.BigEndian.PutUint64(buf, uint64(v))
+		binary.BigEndian.PutUint64(buf, math.Float64bits(v))
 		hasher.Write(buf)
 
 	case bool:

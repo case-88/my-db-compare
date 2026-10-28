@@ -29,6 +29,7 @@ comparison:
   ignore_json_key_order: true        # true: compare JSON by meaning, ignoring key order (default: true)
   ignore_large_columns: false        # true: skip TEXT/BLOB/JSON columns (default: false)
   generate_correction_queries: false # true: write UPDATE/INSERT/DELETE queries that fix mismatches (default: false)
+  check_target_only_rows: false      # true: also scan target keys for rows absent from source (extra reads)
 
   # Full mode only
   full_mode_chunk_size: 2000      # rows read per query (default: 2000)

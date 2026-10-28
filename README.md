@@ -25,8 +25,8 @@ It was built for database migrations between MySQL-compatible databases, where y
 ## Features
 
 - **Three run modes**
-  - `sample`: compares a random sample of rows per table. Takes minutes, so it suits routine monitoring.
-  - `full`: compares every row, chunk by chunk, with bounded memory. Use it for final sign-off after a migration.
+  - `sample`: compares random rows within primary-key ranges. This is a spot check, not a proof of equality.
+  - `full`: compares every source row, chunk by chunk, with bounded memory. Enable `check_target_only_rows` to also detect extra target rows.
   - `retry`: re-checks only the rows that mismatched in an earlier run. Useful when the target was still catching up (replication lag).
 - **Parallel by design.** Several tables run at once, and in full mode each table is also split into primary-key ranges.
 - **Migration-aware comparison.** Optional rules ignore differences that are expected between engines:
@@ -149,6 +149,7 @@ Flags override values in the config file.
 | `--ignore-json-key-order` | `true` | all | Compare JSON by meaning, not by key order |
 | `--ignore-large-columns` | `false` | all | Skip `TEXT` / `BLOB` / `JSON` columns |
 | `--generate-correction-queries` | `false` | all | Write SQL that would make the target match the source |
+| `--check-target-only-rows` | `false` | sample, full | Also check target keys for rows absent from the source (`true` / `false`) |
 
 ## Configuration
 
@@ -264,12 +265,32 @@ Results always use **source** names, so mapped and unmapped tables read the same
 
 `retry` re-reads each mismatch with `query` on the source and `target_query` on the target. Run it with **the same `mappings`** used to produce the results. Columns in `exclude` are dropped before re-comparing, even if an older result's query selected them. If the config and a result file disagree about whether a table is mapped, those records are kept as they were (never reported as resolved), and a warning is logged.
 
+### Checking rows that exist only on the target
+
+By default, comparison reads source rows and looks up their keys on the target. It does **not** detect extra target rows. Enable the optional reverse check:
+
+```yaml
+comparison:
+  check_target_only_rows: true
+  generate_correction_queries: true
+```
+
+Or use `--check-target-only-rows=true` (use `false` to override an enabled config).
+
+- `full` scans all target keys and checks their existence on the source, including an empty source and keys outside the source's range.
+- `sample` draws an independent target key sample. Unsampled extra rows may remain undetected.
+- The extra pass reads keys only and adds source lookups. Common rows are not compared or counted twice.
+- Extra target rows become `MISSING_IN_SOURCE`. With correction queries enabled, they receive a `DELETE` using the mapped target table and column names, with the **entire** key in `WHERE`. SQL is generated only, never executed.
+- This applies to rows in selected table pairs, not discovery of target-only tables. `retry` rechecks existing records without another scan.
+
+The summary records `config.check_target_only_rows`. Each table records whether its check completed (`target_only_checked`) and how many target keys it examined (`target_rows_checked`).
+
 ## Choosing a mode
 
 | | `sample` | `full` | `retry` |
 |---|---|---|---|
 | **Use it for** | Routine checks, quick confidence | Final sign-off after a migration | Confirming earlier mismatches |
-| **Rows compared** | `sample_size` random rows per table | All rows | Only the rows listed in a previous run |
+| **Rows compared** | Random rows within PK ranges, up to the requested sample | All source rows; optionally all target keys | Only the rows listed in a previous run |
 | **Typical duration** | Minutes | Hours to days, depending on size | Seconds to minutes |
 | **Memory** | Grows with the sample size | Fixed, based on chunk size | Small |
 
@@ -279,6 +300,10 @@ Results always use **source** names, so mapped and unmapped tables read the same
 2. Each range is read in chunks of `full_mode_chunk_size` rows from both databases, and the chunks are compared.
 3. Every mismatch is written to the log immediately, so memory stays flat.
 4. Progress is logged every minute.
+
+Pagination sorts by the complete key and resumes strictly after the last complete key. Composite keys have no fixed column-count limit; strings and maximum integers do not require incrementing a value.
+
+Sampling uses `ORDER BY RAND()` within each range (or across a small table). This removes the preference for the first rows but scans and sorts eligible rows even with a small `LIMIT`. It is not a uniform sample across an unevenly populated table, and range quotas may leave the requested sample size unmet.
 
 **Watch your connection count.** Full mode opens many connections at once:
 
@@ -330,6 +355,12 @@ results/
 
 `summary.json` also records `run_mode` (`sample`, `full` or `retry`) and, for retry runs, the `input_dir` that was re-checked.
 
+`status` distinguishes `RUNNING`, `INCOMPLETE`, `MISMATCHES FOUND`, `SOURCE ROWS MATCHED`, `SAMPLED ROWS MATCHED`, `RETRY ROWS MATCHED`, and `ALL MATCHED`. `ALL MATCHED` requires a completed full comparison with the target-only check enabled. When disabled, the console prints `Target-only rows: NOT CHECKED`.
+
+Query/partition/output failures are propagated. Failed tables count toward `tables_failed`, retain their `error`, and are excluded from `tables_compared`. Skipped tables also make the run incomplete. Exit codes: `0` no detected differences within the stated scope; `1` mismatches; `2` errors/incomplete comparison; `124` timeout; `130` cancellation.
+
+Backslashes, control bytes, and non-ASCII bytes use hexadecimal SQL literals in generated queries, independent of `NO_BACKSLASH_ESCAPES`.
+
 ## Development
 
 ```bash
@@ -347,6 +378,8 @@ go test ./...
 ```
 
 When these variables are not set, the integration tests are skipped.
+
+Correctness regression tests use a disposable local MySQL server: set `TEST_COMPARE_PORT` to its loopback port and run `go test ./...`. They connect as `root` without a password, create isolated `compare_test_*` schemas, and remove them afterwards. `go test -short ./...` also skips these tests.
 
 More documentation:
 

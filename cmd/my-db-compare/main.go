@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -46,6 +47,7 @@ type cliOptions struct {
 	ignoreJSON         string
 	ignoreLarge        string
 	generateCorrection string
+	checkTargetOnly    string
 	inputDir           string
 }
 
@@ -105,6 +107,9 @@ func main() {
 	// Apply command line overrides
 	applyOverrides(cfg, opts.tables, opts.sampleSize, opts.parallelism, opts.chunkSize, opts.delayMs,
 		opts.ignoreDatetime, opts.ignoreZero, opts.ignoreJSON, opts.ignoreLarge, opts.generateCorrection)
+	if v := parseBool(opts.checkTargetOnly); v != nil {
+		cfg.Comparison.CheckTargetOnlyRows = *v
+	}
 	if opts.runMode == runModeFull {
 		cfg.Comparison.Mode = "full"
 	} else if opts.runMode == runModeSample {
@@ -173,33 +178,36 @@ func main() {
 
 	// Run comparison
 	result, err := r.Run(ctx)
-	if err != nil {
-		if ctx.Err() == context.Canceled {
-			logger.Warn("comparison was canceled")
-			os.Exit(130) // 128 + SIGINT
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			logger.Warn("comparison timed out")
-			os.Exit(124) // timeout exit code
-		}
-		logger.Fatal("comparison failed", zap.Error(err))
+	if result != nil && result.Summary != nil {
+		result.Summary.Print()
 	}
-
-	// Print summary
-	result.Summary.Print()
-
-	// Exit with appropriate code
-	if result.Summary.HasMismatches() {
-		logger.Info("comparison completed with mismatches",
-			zap.Int("mismatches", result.Summary.TotalVerified),
-		)
-		os.Exit(1)
+	if code := comparisonExitCode(ctx.Err(), err, result); code != 0 {
+		if err != nil {
+			logger.Error("comparison failed", zap.Error(err))
+		}
+		os.Exit(code)
 	}
 
 	logger.Info("comparison completed successfully",
 		zap.Duration("duration", result.Summary.Duration()),
 	)
 	os.Exit(0)
+}
+
+func comparisonExitCode(ctxErr, runErr error, result *runner.Result) int {
+	if errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
+		return 124
+	}
+	if errors.Is(ctxErr, context.Canceled) || errors.Is(runErr, context.Canceled) {
+		return 130
+	}
+	if runErr != nil || result == nil || result.Summary == nil || result.Summary.Incomplete() {
+		return 2
+	}
+	if result.Summary.HasMismatches() {
+		return 1
+	}
+	return 0
 }
 
 func setupLogger(level string) (*zap.Logger, error) {
@@ -334,6 +342,7 @@ func parseArgs(args []string) (*cliOptions, error) {
 	if mode == runModeRetry {
 		fs.StringVar(&opts.inputDir, "input", "", "Directory containing mismatch logs to retry")
 	} else {
+		fs.StringVar(&opts.checkTargetOnly, "check-target-only-rows", "", "Check target-only keys (true/false, default: false)")
 		fs.StringVar(&opts.tables, "tables", "", "Override tables to compare (comma-separated, e.g., 'db1.users,db2.*')")
 		fs.IntVar(&opts.sampleSize, "sample-size", 0, "Override sample size per table (0 = use config)")
 		fs.IntVar(&opts.parallelism, "parallelism", 0, "Override parallelism (0 = use config)")
@@ -346,6 +355,9 @@ func parseArgs(args []string) (*cliOptions, error) {
 	}
 	if fs.NArg() > 0 {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if opts.checkTargetOnly != "" && parseBool(opts.checkTargetOnly) == nil {
+		return nil, fmt.Errorf("check-target-only-rows must be true or false")
 	}
 
 	if mode == runModeRetry && strings.TrimSpace(opts.inputDir) == "" {

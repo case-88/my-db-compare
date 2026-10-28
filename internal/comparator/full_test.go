@@ -126,28 +126,6 @@ func TestCreatePartitions_ZeroCount(t *testing.T) {
 	assert.Len(t, partitions, 1)
 }
 
-func TestIncrementKey(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    interface{}
-		expected interface{}
-	}{
-		{"int64", int64(10), int64(11)},
-		{"uint64", uint64(10), uint64(11)},
-		{"int", int(10), int(11)},
-		{"int32", int32(10), int32(11)},
-		{"uint32", uint32(10), uint32(11)},
-		{"string", "abc", "abc"}, // Non-numeric returns same value
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := incrementKey(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestBuildColumnListForQuery(t *testing.T) {
 	t.Run("empty columns returns *", func(t *testing.T) {
 		result := buildColumnListForQuery(nil)

@@ -1,10 +1,12 @@
 package types
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // MismatchType represents the type of data mismatch
@@ -332,12 +334,9 @@ func formatValue(v interface{}) string {
 
 	switch val := v.(type) {
 	case string:
-		// Escape single quotes
-		escaped := strings.ReplaceAll(val, "'", "''")
-		return fmt.Sprintf("'%s'", escaped)
+		return sqlString(val)
 	case []byte:
-		escaped := strings.ReplaceAll(string(val), "'", "''")
-		return fmt.Sprintf("'%s'", escaped)
+		return sqlString(string(val))
 	case time.Time:
 		return fmt.Sprintf("'%s'", val.Format("2006-01-02 15:04:05"))
 	case bool:
@@ -348,6 +347,21 @@ func formatValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// sqlString은 SQL 모드와 관계없이 백슬래시·제어문자를 보존한다.
+func sqlString(value string) string {
+	for _, b := range []byte(value) {
+		if b == '\\' || b < 0x20 || b >= 0x7f {
+			literal := "X'" + hex.EncodeToString([]byte(value)) + "'"
+			// JSON 칼럼은 binary 문자 집합을 거부하므로 유효한 UTF-8은 명시한다.
+			if utf8.ValidString(value) {
+				return "_utf8mb4 " + literal
+			}
+			return literal
+		}
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // BuildCorrectionQuery generates a correction query based on mismatch type

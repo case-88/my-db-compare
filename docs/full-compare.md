@@ -1,5 +1,15 @@
 # Full Compare Mode
 
+Full mode scans source rows by default. Set `comparison.check_target_only_rows: true`
+to add a target-key scan, including an empty source and keys outside its range.
+Only target-only rows are reported by the extra pass. With correction queries
+enabled, they receive a mapped `DELETE` with the complete key; SQL is never executed.
+
+Pagination resumes after the complete last key using conditions such as
+`a > ? OR (a = ? AND b > ?)`, extended to all key columns. `ORDER BY` uses the same
+complete key. Query/output errors and cancellation produce an incomplete result
+and a nonzero exit code.
+
 Design document for the full data comparison feature.
 
 **Status**: Implemented
@@ -9,7 +19,7 @@ Design document for the full data comparison feature.
 | Item | Sampling mode | Full mode |
 |------|--------------|-----------|
 | Purpose | Sample-based verification of large tables | Exhaustive data consistency check |
-| Comparison scope | sample_size rows | All data |
+| Comparison scope | Sampled rows | All source rows; target-only keys when enabled |
 | Typical usage | Routine monitoring | Manual / infrequent runs |
 | Duration | Minutes | Hours to days |
 
@@ -24,6 +34,7 @@ Design document for the full data comparison feature.
 ```yaml
 comparison:
   mode: full                     # sampling / full (default: sampling)
+  check_target_only_rows: false   # optional reverse key scan
   parallelism: 10                # Number of tables processed in parallel (shared by both modes)
 
   # sampling mode only
@@ -40,6 +51,7 @@ comparison:
 | Key | Default | Description |
 |------|--------|------|
 | `mode` | `sampling` | Selects the comparison mode |
+| `check_target_only_rows` | `false` | Scan target keys for rows missing from source |
 | `parallelism` | `10` | Number of tables processed concurrently |
 | `full_mode_chunk_size` | `2000` | Chunk (batch) size |
 | `full_mode_delay_ms` | `10` | Wait time between chunks (spreads DB load) |
