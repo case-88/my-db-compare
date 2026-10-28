@@ -267,3 +267,50 @@ func TestRunner_CompareTable(t *testing.T) {
 	assert.True(t, result.Skipped)
 	assert.Contains(t, result.SkipReason, "no primary key")
 }
+
+func TestMappingExclude(t *testing.T) {
+	cfg := getTestConfig()
+	cfg.Mappings = []config.TableMapping{{
+		Source:  "app.users",
+		Target:  "app_v2.members",
+		Columns: map[string]string{"id": "member_id"},
+		Exclude: []string{"Phone"},
+	}}
+	r, err := New(cfg, t.TempDir(), "sample", "", nil)
+	require.NoError(t, err)
+
+	table := types.TableMeta{
+		Schema:    "app",
+		Name:      "users",
+		PKColumns: []string{"id"},
+		Columns:   []types.ColumnMeta{{Name: "id"}, {Name: "name"}, {Name: "phone"}},
+	}
+
+	t.Run("excluded columns are not compared", func(t *testing.T) {
+		assert.Equal(t, []string{"id", "name"}, r.getCompareColumns(table))
+	})
+
+	t.Run("excluded columns are never selected on the target", func(t *testing.T) {
+		target := r.targetTable(table)
+		assert.Equal(t, []types.ColumnMeta{{Name: "id"}, {Name: "name"}}, target.Columns)
+		assert.Equal(t, "SELECT `member_id` AS `id`, `name` FROM `app_v2`.`members` WHERE `member_id` = 1;",
+			target.LookupQuery(map[string]interface{}{"id": 1}, nil))
+	})
+
+	t.Run("unmapped tables are unaffected", func(t *testing.T) {
+		other := table
+		other.Name = "orders"
+		assert.Equal(t, []string{"id", "name", "phone"}, r.getCompareColumns(other))
+		assert.Nil(t, r.excludedColumns(other))
+	})
+}
+
+func TestDropColumns(t *testing.T) {
+	row := types.Row{"id": 1, "Phone": "010", "name": "Kim"}
+	dropColumns(row, map[string]bool{"phone": true})
+	assert.Equal(t, types.Row{"id": 1, "name": "Kim"}, row)
+
+	dropColumns(nil, map[string]bool{"phone": true}) // must not panic
+	dropColumns(row, nil)
+	assert.Len(t, row, 2)
+}

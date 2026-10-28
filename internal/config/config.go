@@ -25,6 +25,19 @@ type TableMapping struct {
 	Source  string            `yaml:"source" mapstructure:"source"`   // source "database.table"
 	Target  string            `yaml:"target" mapstructure:"target"`   // target "database.table"
 	Columns map[string]string `yaml:"columns" mapstructure:"columns"` // source column -> target column
+	Exclude []string          `yaml:"exclude" mapstructure:"exclude"` // source columns left out of the comparison
+}
+
+// ExcludeSet returns the excluded source columns, lowercased
+func (m TableMapping) ExcludeSet() map[string]bool {
+	if len(m.Exclude) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(m.Exclude))
+	for _, col := range m.Exclude {
+		result[strings.ToLower(col)] = true
+	}
+	return result
 }
 
 // ColumnMap returns the column mapping with lowercase source column keys
@@ -339,6 +352,17 @@ func (c *Config) validateMappings() error {
 		for src, target := range m.Columns {
 			if src == "" || target == "" {
 				return fmt.Errorf("mapping %q has an empty column name", m.Source)
+			}
+		}
+		excluded := m.ExcludeSet()
+		for _, col := range m.Exclude {
+			if col == "" {
+				return fmt.Errorf("mapping %q has an empty column name in exclude", m.Source)
+			}
+		}
+		for src := range m.Columns {
+			if excluded[strings.ToLower(src)] {
+				return fmt.Errorf("mapping %q: column %q is in both columns and exclude", m.Source, src)
 			}
 		}
 	}

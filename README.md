@@ -180,7 +180,13 @@ A table is compared when it matches at least one `include` pattern and no `exclu
 
 ### Mapping tables and columns
 
-By default a source table is compared with the target table **of the same name**, column by column **with the same names**. When the target was renamed during a migration, tell the tool how the two line up with `mappings`:
+By default a source table is compared with the target table **of the same name**, column by column **with the same names**. When the target differs, describe how the two line up with `mappings`. Each entry can do three things, and you can use any of them alone or together:
+
+| Key | Use it when | Example |
+|-----|-------------|---------|
+| `target` | The table was renamed or moved to another database | `target: app_v2.members` |
+| `columns` | Some columns were renamed | `name: full_name` |
+| `exclude` | Some source columns should not be compared (dropped on the target, or expected to differ) | `exclude: [phone, fax]` |
 
 ```yaml
 mappings:
@@ -189,9 +195,14 @@ mappings:
     columns:                   # source column: target column
       id: member_id
       name: full_name
+    exclude: [phone]           # source columns left out of the comparison
 
   - source: shop.orders
     target: shop.orders_new    # only the table was renamed
+
+  - source: shop.payments      # same table name on both sides:
+    target: shop.payments      # only some columns are skipped
+    exclude: [legacy_memo]
 ```
 
 ```
@@ -200,6 +211,8 @@ mappings:
  │ id     (PK)         │ ───────────▶ │ member_id   (PK)    │   listed in columns
  │ name                │ ───────────▶ │ full_name           │   listed in columns
  │ email               │ ───────────▶ │ email               │   not listed → same name
+ │ phone               │      ✕       │                     │   in exclude → not compared
+ │                     │              │ created_by          │   target-only → ignored
  └─────────────────────┘              └─────────────────────┘
 ```
 
@@ -209,10 +222,30 @@ mappings:
 |------|---------|
 | **Unlisted columns keep their name** | List only the columns that were renamed. |
 | **Key columns follow the same mapping** | Rows are matched by the **source** table's primary key (or unique key, if it has no primary key). If the key was renamed, list it in `columns` like any other column. |
-| **Every source column must exist on the target** | The target may have *extra* columns; they are ignored. But a source column that has no counterpart on the target is an error. |
+| **Every compared source column must exist on the target** | A source column with no counterpart on the target is an error. If it was dropped on purpose, put it in `exclude`. |
+| **Target-only columns need nothing** | Only source columns are read, so extra columns on the target are never read or compared. Don't list them anywhere. |
+| **`exclude` takes source column names** | Write each name as it is on the source. An excluded column needs no `columns` entry, and a column cannot be in both. |
+| **Key columns cannot be excluded** | Rows are matched by the key, so excluding a key column is an error. |
 | **Mapped tables are always compared** | Even when `tables.include` / `exclude` would skip them. Write each source table once. |
 | **Source names ignore case** | `source` and the column keys are matched to the source table and columns case-insensitively. The `target` table name is used exactly as written, so write it with the target's real case. |
-| **Typos stop the run** | Before comparing, the tool checks every mapped table and column on both sides and exits with an error that names the missing one. Without this check a typo would look like every row is missing from the target. |
+| **Typos stop the run** | Before comparing in `sample` and `full` mode, the tool checks every mapped table and column on both sides, including the names in `exclude`, and exits with an error that names the problem. Without this check a typo would look like every row is missing from the target, or would silently skip a column. |
+
+#### Excluding columns safely
+
+`exclude` is the only way a column is silently left out of the comparison, so differences in that column will **never** be reported. To keep that visible:
+
+- Excluded columns are listed in the log for every table (`excluded columns from comparison`), and in `--dry-run` as `app.users -> app_v2.members (excluding phone)`.
+- In `sample` and `full` mode, a name in `exclude` that does not exist on the source stops the run, so a typo cannot hide anything. `retry` does not re-check names; run it with the config you compared with.
+- Prefer excluding only columns that are truly gone or meant to differ. If you only want to skip large `TEXT`/`BLOB`/`JSON` columns everywhere, use `comparison.ignore_large_columns` instead.
+
+Error messages you may see:
+
+| Message | Meaning |
+|---------|---------|
+| `target column app_v2.members.phone not found (for source column phone)` | The column is not on the target. Map it in `columns`, or `exclude` it. |
+| `excluded column "phnoe" not found in the source table` | A typo in `exclude`. |
+| `key column "id" cannot be excluded; rows are matched by it` | Remove the key column from `exclude`. If it was renamed, map it in `columns`. |
+| `column "name" is in both columns and exclude` | Keep it in one of them. |
 
 #### What you get in the results
 
@@ -229,7 +262,7 @@ Results always use **source** names, so mapped and unmapped tables read the same
 
 #### Mappings and retry
 
-`retry` re-reads each mismatch with `query` on the source and `target_query` on the target. Run it with **the same `mappings`** used to produce the results. If the config and a result file disagree about whether a table is mapped, those records are kept as they were (never reported as resolved), and a warning is logged.
+`retry` re-reads each mismatch with `query` on the source and `target_query` on the target. Run it with **the same `mappings`** used to produce the results. Columns in `exclude` are dropped before re-comparing, even if an older result's query selected them. If the config and a result file disagree about whether a table is mapped, those records are kept as they were (never reported as resolved), and a warning is logged.
 
 ## Choosing a mode
 

@@ -92,6 +92,9 @@ func (r *Runner) DryRun(ctx context.Context) error {
 		if target := r.targetTable(t); target.FullName() != name {
 			name += " -> " + target.FullName()
 		}
+		if m := r.cfg.MappingFor(t.FullName()); m != nil && len(m.Exclude) > 0 {
+			name += " (excluding " + strings.Join(m.Exclude, ", ") + ")"
+		}
 		fmt.Printf("  - %s (estimated %d rows)\n", name, t.EstimatedRows)
 	}
 
@@ -606,7 +609,25 @@ func (r *Runner) targetTable(table types.TableMeta) types.TableMeta {
 	target.Schema = schema
 	target.Name = name
 	target.ColumnMap = m.ColumnMap()
+
+	// Excluded columns may not exist on the target, so never select them there
+	if excluded := m.ExcludeSet(); excluded != nil {
+		target.Columns = nil
+		for _, col := range table.Columns {
+			if !excluded[strings.ToLower(col.Name)] {
+				target.Columns = append(target.Columns, col)
+			}
+		}
+	}
 	return target
+}
+
+// excludedColumns returns the source columns excluded in mappings, lowercased
+func (r *Runner) excludedColumns(table types.TableMeta) map[string]bool {
+	if m := r.cfg.MappingFor(table.FullName()); m != nil {
+		return m.ExcludeSet()
+	}
+	return nil
 }
 
 // checkMappings verifies that every mapping points at existing tables and
@@ -648,10 +669,21 @@ func (r *Runner) checkMappings(ctx context.Context, tables []types.TableMeta) er
 				return fmt.Errorf("mapping %s: source column %q not found", m.Source, src)
 			}
 		}
+		excluded := m.ExcludeSet()
+		for _, col := range m.Exclude {
+			if !sourceCols[strings.ToLower(col)] {
+				return fmt.Errorf("mapping %s: excluded column %q not found in the source table", m.Source, col)
+			}
+		}
+		for _, key := range source.KeyColumns() {
+			if excluded[strings.ToLower(key)] {
+				return fmt.Errorf("mapping %s: key column %q cannot be excluded; rows are matched by it", m.Source, key)
+			}
+		}
 
 		targetCols := columnNameSet(target.Columns)
 		mapped := r.targetTable(source)
-		for _, col := range source.Columns {
+		for _, col := range mapped.Columns {
 			physical := mapped.PhysicalColumn(col.Name)
 			if !targetCols[strings.ToLower(physical)] {
 				return fmt.Errorf("mapping %s: target column %s.%s not found (for source column %s)",
@@ -932,13 +964,22 @@ func (r *Runner) getCompareColumns(table types.TableMeta) []string {
 		keyColumns[col] = true
 	}
 
+	userExcluded := r.excludedColumns(table)
+
 	var columns []string
 	var excludedCount int
+	var userExcludedNames []string
 
 	for _, col := range table.Columns {
 		// Always include key columns
 		if keyColumns[col.Name] {
 			columns = append(columns, col.Name)
+			continue
+		}
+
+		// Columns excluded in mappings
+		if userExcluded[strings.ToLower(col.Name)] {
+			userExcludedNames = append(userExcludedNames, col.Name)
 			continue
 		}
 
@@ -951,6 +992,12 @@ func (r *Runner) getCompareColumns(table types.TableMeta) []string {
 		columns = append(columns, col.Name)
 	}
 
+	if len(userExcludedNames) > 0 {
+		r.logger.Info("excluded columns from comparison (mappings exclude)",
+			zap.String("table", table.FullName()),
+			zap.Strings("excluded", userExcludedNames),
+		)
+	}
 	if excludedCount > 0 {
 		r.logger.Debug("excluded large columns from comparison",
 			zap.String("table", table.FullName()),
