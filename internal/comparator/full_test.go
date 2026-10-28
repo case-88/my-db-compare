@@ -224,3 +224,29 @@ func TestFullCompareResult(t *testing.T) {
 	assert.Equal(t, int64(2), result.MissingInSource)
 	assert.Equal(t, int64(5), result.Different)
 }
+
+// Partition ranges are inclusive on both ends, so they must not share a key.
+// Otherwise the boundary row is compared and reported twice.
+func TestCreatePartitions_NoSharedBoundary(t *testing.T) {
+	fc := &FullComparer{}
+
+	t.Run("int64", func(t *testing.T) {
+		parts := fc.createPartitions(int64(1), int64(100), 4)
+		for i := 1; i < len(parts); i++ {
+			assert.Equal(t, parts[i-1].MaxValue.(int64)+1, parts[i].MinValue.(int64), "partition %d", i)
+		}
+	})
+
+	t.Run("uint64", func(t *testing.T) {
+		parts := fc.createPartitions(uint64(0), uint64(1000), 2)
+		assert.Equal(t, parts[0].MaxValue.(uint64)+1, parts[1].MinValue.(uint64))
+	})
+
+	t.Run("fewer keys than partitions uses one partition", func(t *testing.T) {
+		parts := fc.createPartitions(uint64(0), uint64(2), 4)
+		assert.Equal(t, []PartitionRange{{Index: 0, MinValue: uint64(0), MaxValue: uint64(2)}}, parts)
+
+		parts = fc.createPartitions(int64(5), int64(5), 4)
+		assert.Equal(t, []PartitionRange{{Index: 0, MinValue: int64(5), MaxValue: int64(5)}}, parts)
+	})
+}
