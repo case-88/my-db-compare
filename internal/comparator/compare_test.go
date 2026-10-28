@@ -496,7 +496,8 @@ func TestToMismatches(t *testing.T) {
 		TotalTarget: 7,
 	}
 
-	mismatches := c.ToMismatches(result, "testdb.users")
+	table := types.TableMeta{Schema: "testdb", Name: "users"}
+	mismatches := c.ToMismatches(result, table, table)
 
 	if len(mismatches) != 3 {
 		t.Errorf("len(mismatches) = %d, want 3", len(mismatches))
@@ -847,5 +848,46 @@ func BenchmarkJsonEqual_SmallJson(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		jsonEqual(a, c)
+	}
+}
+
+func TestToMismatches_Mapped(t *testing.T) {
+	c := NewComparatorWithOptions([]string{"id"}, ComparatorOptions{GenerateCorrectionQueries: true})
+	result := &CompareResult{
+		Different: []DiffPair{{
+			SourceRow:   types.Row{"id": int64(3), "name": "carol"},
+			TargetRow:   types.Row{"id": int64(3), "name": "caroline"},
+			DiffColumns: []string{"name"},
+		}},
+	}
+	source := types.TableMeta{Schema: "app", Name: "users"}
+	target := types.TableMeta{
+		Schema:    "app_v2",
+		Name:      "members",
+		ColumnMap: map[string]string{"id": "member_id", "name": "full_name"},
+	}
+
+	mismatches := c.ToMismatches(result, source, target)
+	if len(mismatches) != 1 {
+		t.Fatalf("len(mismatches) = %d, want 1", len(mismatches))
+	}
+	m := mismatches[0]
+
+	if m.Table != "app.users" {
+		t.Errorf("Table = %s, want app.users", m.Table)
+	}
+	if want := "SELECT `id`, `name` FROM `app`.`users` WHERE `id` = 3;"; m.Query != want {
+		t.Errorf("Query = %s, want %s", m.Query, want)
+	}
+	if want := "SELECT `member_id` AS `id`, `full_name` AS `name` FROM `app_v2`.`members` WHERE `member_id` = 3;"; m.TargetQuery != want {
+		t.Errorf("TargetQuery = %s, want %s", m.TargetQuery, want)
+	}
+	if want := "UPDATE `app_v2`.`members` SET `full_name` = 'carol' WHERE `member_id` = 3;"; m.CorrectionQuery != want {
+		t.Errorf("CorrectionQuery = %s, want %s", m.CorrectionQuery, want)
+	}
+
+	// Unmapped tables leave TargetQuery empty
+	if got := c.ToMismatches(result, source, source)[0].TargetQuery; got != "" {
+		t.Errorf("unmapped TargetQuery = %q, want empty", got)
 	}
 }

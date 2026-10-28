@@ -464,7 +464,19 @@ func toInt64(v interface{}) (int64, bool) {
 
 // ToMismatches converts CompareResult to a list of Mismatch records
 // Deduplicates mismatches by PK to handle cases where duplicate sampling may occur
-func (c *Comparator) ToMismatches(result *CompareResult, tableName string) []types.Mismatch {
+// target is the table the rows were read from on the target side; it differs
+// from source only when the table is mapped. Mismatches always use source
+// names; target_query and correction queries use target names.
+func (c *Comparator) ToMismatches(result *CompareResult, source, target types.TableMeta) []types.Mismatch {
+	tableName := source.FullName()
+	mapped := target.FullName() != tableName || target.ColumnMap != nil
+	targetQuery := func(pk map[string]interface{}, columns []string) string {
+		if !mapped {
+			return ""
+		}
+		return target.LookupQuery(pk, columns)
+	}
+
 	var mismatches []types.Mismatch
 	now := time.Now()
 	genCorrection := c.options.GenerateCorrectionQueries
@@ -482,15 +494,16 @@ func (c *Comparator) ToMismatches(result *CompareResult, tableName string) []typ
 		seenPKs[pkKey] = true
 
 		m := types.Mismatch{
-			Table:      tableName,
-			PK:         pk,
-			Type:       types.MismatchMissingTarget,
-			SourceData: row,
-			Query:      types.BuildLookupQuery(tableName, pk),
-			Timestamp:  now,
+			Table:       tableName,
+			PK:          pk,
+			Type:        types.MismatchMissingTarget,
+			SourceData:  row,
+			Query:       types.BuildLookupQuery(tableName, pk),
+			TargetQuery: targetQuery(pk, nil),
+			Timestamp:   now,
 		}
 		if genCorrection {
-			m.CorrectionQuery = types.BuildInsertQuery(tableName, row)
+			m.CorrectionQuery = target.CorrectionQuery(m.Type, pk, row, nil)
 		}
 		mismatches = append(mismatches, m)
 	}
@@ -505,15 +518,16 @@ func (c *Comparator) ToMismatches(result *CompareResult, tableName string) []typ
 		seenPKs[pkKey] = true
 
 		m := types.Mismatch{
-			Table:      tableName,
-			PK:         pk,
-			Type:       types.MismatchMissingSource,
-			TargetData: row,
-			Query:      types.BuildLookupQuery(tableName, pk),
-			Timestamp:  now,
+			Table:       tableName,
+			PK:          pk,
+			Type:        types.MismatchMissingSource,
+			TargetData:  row,
+			Query:       types.BuildLookupQuery(tableName, pk),
+			TargetQuery: targetQuery(pk, nil),
+			Timestamp:   now,
 		}
 		if genCorrection {
-			m.CorrectionQuery = types.BuildDeleteQuery(tableName, pk)
+			m.CorrectionQuery = target.CorrectionQuery(m.Type, pk, nil, nil)
 		}
 		mismatches = append(mismatches, m)
 	}
@@ -535,10 +549,11 @@ func (c *Comparator) ToMismatches(result *CompareResult, tableName string) []typ
 			SourceData:  diff.SourceRow,
 			TargetData:  diff.TargetRow,
 			Query:       types.BuildLookupQueryWithColumns(tableName, pk, diff.DiffColumns),
+			TargetQuery: targetQuery(pk, diff.DiffColumns),
 			Timestamp:   now,
 		}
 		if genCorrection {
-			m.CorrectionQuery = types.BuildUpdateQuery(tableName, pk, diff.SourceRow, diff.DiffColumns)
+			m.CorrectionQuery = target.CorrectionQuery(m.Type, pk, diff.SourceRow, diff.DiffColumns)
 		}
 		mismatches = append(mismatches, m)
 	}

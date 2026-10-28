@@ -86,6 +86,97 @@ func (t TableMeta) PhysicalColumn(col string) string {
 	return col
 }
 
+// PhysicalColumns returns the physical column for each of cols
+func (t TableMeta) PhysicalColumns(cols []string) []string {
+	if t.ColumnMap == nil {
+		return cols
+	}
+	result := make([]string, len(cols))
+	for i, col := range cols {
+		result[i] = t.PhysicalColumn(col)
+	}
+	return result
+}
+
+// PhysicalRow returns row with its keys renamed to this table's physical columns
+func (t TableMeta) PhysicalRow(row map[string]interface{}) map[string]interface{} {
+	if t.ColumnMap == nil || row == nil {
+		return row
+	}
+	result := make(map[string]interface{}, len(row))
+	for col, val := range row {
+		result[t.PhysicalColumn(col)] = val
+	}
+	return result
+}
+
+// SelectList builds a select list for columns. A column stored under a
+// different name in this table is read with an alias, so rows always use the
+// requested column names. Empty columns select every column of the table.
+func (t TableMeta) SelectList(columns []string) string {
+	if len(columns) == 0 {
+		if t.ColumnMap == nil || len(t.Columns) == 0 {
+			return "*"
+		}
+		columns = make([]string, len(t.Columns))
+		for i, col := range t.Columns {
+			columns[i] = col.Name
+		}
+	}
+
+	parts := make([]string, len(columns))
+	for i, col := range columns {
+		physical := t.PhysicalColumn(col)
+		if physical == col {
+			parts[i] = fmt.Sprintf("`%s`", col)
+		} else {
+			parts[i] = fmt.Sprintf("`%s` AS `%s`", physical, col)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// LookupQuery builds a SELECT that reads one row of this table by its key.
+// Selected columns use the requested names (see SelectList).
+// With columns, only the key and those columns are selected.
+func (t TableMeta) LookupQuery(pk map[string]interface{}, columns []string) string {
+	if len(pk) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(pk))
+	for k := range pk {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var selected []string
+	if len(columns) > 0 {
+		seen := make(map[string]bool)
+		for _, col := range append(append([]string{}, keys...), columns...) {
+			if !seen[col] {
+				seen[col] = true
+				selected = append(selected, col)
+			}
+		}
+	}
+
+	conditions := make([]string, len(keys))
+	for i, k := range keys {
+		conditions[i] = fmt.Sprintf("`%s` = %s", t.PhysicalColumn(k), formatValue(pk[k]))
+	}
+
+	return fmt.Sprintf("SELECT %s FROM `%s`.`%s` WHERE %s;",
+		t.SelectList(selected), t.Schema, t.Name, strings.Join(conditions, " AND "))
+}
+
+// CorrectionQuery builds the query that makes this (target) table match the
+// source, using this table's physical column names.
+func (t TableMeta) CorrectionQuery(mismatchType MismatchType, pk map[string]interface{}, sourceData Row, diffColumns []string) string {
+	return BuildCorrectionQuery(mismatchType, t.FullName(),
+		t.PhysicalRow(pk), t.PhysicalRow(sourceData), t.PhysicalColumns(diffColumns))
+}
+
 // FullName returns schema.table format
 func (t TableMeta) FullName() string {
 	return t.Schema + "." + t.Name
@@ -130,6 +221,7 @@ type Mismatch struct {
 	SourceData      Row                    `json:"source,omitempty"`
 	TargetData      Row                    `json:"target,omitempty"`
 	Query           string                 `json:"query"`                      // SELECT query to lookup this row
+	TargetQuery     string                 `json:"target_query,omitempty"`     // SELECT on the target when its table or column names differ (mappings)
 	CorrectionQuery string                 `json:"correction_query,omitempty"` // UPDATE/INSERT/DELETE query to fix target
 	Timestamp       time.Time              `json:"timestamp"`
 }

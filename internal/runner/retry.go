@@ -198,6 +198,10 @@ func (r *Runner) retryMismatchFile(
 	}
 	defer file.Close()
 
+	target := r.targetTable(tableFromName(defaultTable))
+	mapped := target.FullName() != defaultTable || target.ColumnMap != nil
+	mappingWarned := false
+
 	handleMismatch := func(m types.Mismatch) error {
 		select {
 		case <-ctx.Done():
@@ -219,6 +223,24 @@ func (r *Runner) retryMismatchFile(
 			return nil
 		}
 
+		if mapped != (m.TargetQuery != "") {
+			if !mappingWarned {
+				mappingWarned = true
+				r.logger.Warn("mappings in config do not match the mismatch records, keeping them unchanged",
+					zap.String("table", defaultTable),
+					zap.Bool("mapped_in_config", mapped),
+					zap.Bool("record_has_target_query", m.TargetQuery != ""),
+				)
+				result.Error = appendError(result.Error, fmt.Errorf("mappings in config do not match %s results", defaultTable))
+			}
+			result.Sampled++
+			return r.writeRetryMismatch(m, result, openWriter, tableLogger)
+		}
+		targetQuery := m.Query
+		if mapped {
+			targetQuery = m.TargetQuery
+		}
+
 		result.Sampled++
 
 		srcRow, srcErr := querySingleRow(ctx, r.srcConn, m.Query)
@@ -231,7 +253,7 @@ func (r *Runner) retryMismatchFile(
 			return r.writeRetryMismatch(m, result, openWriter, tableLogger)
 		}
 
-		targetRow, targetErr := querySingleRow(ctx, r.targetConn, m.Query)
+		targetRow, targetErr := querySingleRow(ctx, r.targetConn, targetQuery)
 		if targetErr != nil {
 			r.logger.Warn("target query failed, keeping mismatch",
 				zap.String("table", defaultTable),
@@ -253,28 +275,30 @@ func (r *Runner) retryMismatchFile(
 		// Missing in target
 		if srcRow != nil && targetRow == nil {
 			newMismatch := types.Mismatch{
-				Table:      defaultTable,
-				PK:         m.PK,
-				Type:       types.MismatchMissingTarget,
-				SourceData: srcRow,
-				Query:      m.Query,
-				Timestamp:  now,
+				Table:       defaultTable,
+				PK:          m.PK,
+				Type:        types.MismatchMissingTarget,
+				SourceData:  srcRow,
+				Query:       m.Query,
+				TargetQuery: m.TargetQuery,
+				Timestamp:   now,
 			}
-			r.populateCorrectionQuery(&newMismatch, generateCorrection)
+			r.populateCorrectionQuery(&newMismatch, target, generateCorrection)
 			return r.writeRetryMismatch(newMismatch, result, openWriter, tableLogger)
 		}
 
 		// Missing in source
 		if srcRow == nil && targetRow != nil {
 			newMismatch := types.Mismatch{
-				Table:      defaultTable,
-				PK:         m.PK,
-				Type:       types.MismatchMissingSource,
-				TargetData: targetRow,
-				Query:      m.Query,
-				Timestamp:  now,
+				Table:       defaultTable,
+				PK:          m.PK,
+				Type:        types.MismatchMissingSource,
+				TargetData:  targetRow,
+				Query:       m.Query,
+				TargetQuery: m.TargetQuery,
+				Timestamp:   now,
 			}
-			r.populateCorrectionQuery(&newMismatch, generateCorrection)
+			r.populateCorrectionQuery(&newMismatch, target, generateCorrection)
 			return r.writeRetryMismatch(newMismatch, result, openWriter, tableLogger)
 		}
 
@@ -293,9 +317,10 @@ func (r *Runner) retryMismatchFile(
 			SourceData:  srcRow,
 			TargetData:  targetRow,
 			Query:       m.Query,
+			TargetQuery: m.TargetQuery,
 			Timestamp:   now,
 		}
-		r.populateCorrectionQuery(&newMismatch, generateCorrection)
+		r.populateCorrectionQuery(&newMismatch, target, generateCorrection)
 		return r.writeRetryMismatch(newMismatch, result, openWriter, tableLogger)
 	}
 
@@ -338,11 +363,17 @@ func (r *Runner) writeRetryMismatchWithLogger(m types.Mismatch, result *reporter
 	return nil
 }
 
-func (r *Runner) populateCorrectionQuery(m *types.Mismatch, enabled bool) {
+func (r *Runner) populateCorrectionQuery(m *types.Mismatch, target types.TableMeta, enabled bool) {
 	if !enabled {
 		return
 	}
-	m.CorrectionQuery = types.BuildCorrectionQuery(m.Type, m.Table, m.PK, m.SourceData, m.DiffColumns)
+	m.CorrectionQuery = target.CorrectionQuery(m.Type, m.PK, m.SourceData, m.DiffColumns)
+}
+
+// tableFromName returns a TableMeta for a "database.table" name
+func tableFromName(name string) types.TableMeta {
+	schema, table, _ := strings.Cut(name, ".")
+	return types.TableMeta{Schema: schema, Name: table}
 }
 
 func findMismatchFiles(dir string) ([]string, error) {
@@ -482,6 +513,10 @@ func parseText(file *os.File, defaultTable string, handle func(types.Mismatch) e
 			if pkStr != "" {
 				current.PK = parsePKLine(pkStr)
 			}
+			continue
+		}
+		if strings.HasPrefix(line, "Target Query:") {
+			current.TargetQuery = strings.TrimSpace(strings.TrimPrefix(line, "Target Query:"))
 			continue
 		}
 		if strings.HasPrefix(line, "Query:") {

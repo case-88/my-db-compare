@@ -273,6 +273,9 @@ func (l *Logger) writeText(mismatch types.Mismatch) error {
 
 	// Query
 	sb.WriteString(fmt.Sprintf("Query: %s\n", mismatch.Query))
+	if mismatch.TargetQuery != "" {
+		sb.WriteString(fmt.Sprintf("Target Query: %s\n", mismatch.TargetQuery))
+	}
 
 	if _, err := l.writer.WriteString(sb.String()); err != nil {
 		return err

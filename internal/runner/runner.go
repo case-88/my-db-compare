@@ -430,7 +430,7 @@ func (r *Runner) compareTableFull(
 	}
 
 	// Run full comparison
-	fullResult, err := fullComparer.CompareTable(ctx, table, compareColumns, handler, progressCh)
+	fullResult, err := fullComparer.CompareTable(ctx, table, r.targetTable(table), compareColumns, handler, progressCh)
 
 	// Close reporter if it was opened
 	mismatchMu.Lock()
@@ -782,7 +782,7 @@ func (r *Runner) compareTable(ctx context.Context, table types.TableMeta) *repor
 	compareResult := comp.CompareSamples(srcResult.Samples, targetRows)
 
 	// Convert to mismatches (with deduplication)
-	mismatches := comp.ToMismatches(compareResult, table.FullName())
+	mismatches := comp.ToMismatches(compareResult, table, r.targetTable(table))
 
 	// Count mismatch types from deduplicated results
 	var missingInTarget, missingInSource, different int

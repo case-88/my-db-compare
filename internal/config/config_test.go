@@ -316,25 +316,14 @@ func TestMappings(t *testing.T) {
 		Columns: map[string]string{"Name": "full_name"},
 	}
 
-	t.Run("valid mapping in sample mode", func(t *testing.T) {
-		cfg := validConfig()
-		cfg.Mappings = []TableMapping{mapping}
-		assert.NoError(t, cfg.ValidateForMode("sample"))
-	})
-
-	t.Run("rejected outside sample mode", func(t *testing.T) {
-		cfg := validConfig()
-		cfg.Mappings = []TableMapping{mapping}
-		assert.ErrorContains(t, cfg.ValidateForMode("full"), "only supported in sample mode")
-		assert.ErrorContains(t, cfg.ValidateForMode("retry"), "only supported in sample mode")
-	})
-
-	t.Run("rejected with correction queries", func(t *testing.T) {
+	t.Run("valid in every mode, with correction queries", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Mappings = []TableMapping{mapping}
 		enabled := true
 		cfg.Comparison.GenerateCorrectionQueries = &enabled
-		assert.ErrorContains(t, cfg.ValidateForMode("sample"), "generate_correction_queries")
+		for _, mode := range []string{"sample", "full", "retry"} {
+			assert.NoError(t, cfg.ValidateForMode(mode), mode)
+		}
 	})
 
 	t.Run("invalid table names", func(t *testing.T) {
