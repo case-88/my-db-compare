@@ -20,8 +20,7 @@ my-db-compare/
 │   ├── db/                 ← DB connections
 │   ├── reporter/           ← Result output
 │   ├── runner/             ← Run orchestration
-│   ├── sampler/            ← Sampling logic
-│   └── verifier/           ← Re-verification logic
+│   └── sampler/            ← Sampling logic
 ├── pkg/types/              ← Shared types
 ├── docs/                   ← Design documents
 └── config.yaml             ← Example configuration file
@@ -55,7 +54,7 @@ make all
 3. **Random sampling** → Samples evenly across the entire data range
 4. **PK/UQ based** → The comparison key is the Primary Key (or a Unique Key if there is no PK)
 5. **Parallel processing** → Tables are processed in parallel, one goroutine per table
-6. **Re-verification** → Accounts for replication lag by re-checking mismatched rows a second time
+6. **Retry mode** → Mismatches caused by replication lag are re-checked later with the separate `retry` mode, which re-reads only the rows in an earlier result ([details](retry-mode.md)). `sample` and `full` do not re-check automatically.
 
 ## Using information_schema
 
@@ -209,36 +208,17 @@ func hashRow(row map[string]interface{}, columns []string) uint64 {
 |                              |                                   |
 |                              v                                   |
 |                    +-----------------+                           |
-|                    | Mismatch List   |                           |
-|                    | (temp storage)  |                           |
-|                    +--------+--------+                           |
-|                             |                                    |
-+-----------------------------+------------------------------------+
-|                        PHASE 2: RE-VERIFY                        |
-+-----------------------------+------------------------------------+
-|                             v                                    |
+|                    | Mismatch log    |                           |
+|                    | - Table, PK     |                           |
+|                    | - Diff columns  |                           |
+|                    | (written as     |                           |
+|                    |  found)         |                           |
 |                    +-----------------+                           |
-|                    | Re-fetch both   |                           |
-|                    | sides by PK     |                           |
-|                    | (replication    |                           |
-|                    |  lag handling)  |                           |
-|                    +--------+--------+                           |
-|                             |                                    |
-|              +--------------+--------------+                     |
-|              v                             v                     |
-|       +-----------+                 +-----------+                |
-|       |   Match   |                 |  Mismatch |                |
-|       |   (PASS)  |                 |  (ERROR)  |                |
-|       +-----------+                 +-----+-----+                |
-|                                           |                      |
-|                                           v                      |
-|                                    +-------------+               |
-|                                    | Error Log   |               |
-|                                    | - Table     |               |
-|                                    | - PK value  |               |
-|                                    | - Diff cols |               |
-|                                    +-------------+               |
+|                                                                  |
 +------------------------------------------------------------------+
+
+Rows that differ only because the target was still catching up
+(replication lag) are re-checked later with `retry` (retry-mode.md).
 ```
 
 ## Data Structures
@@ -251,14 +231,13 @@ type Config struct {
     Comparison  Comparison  // Comparison settings
     Tables      TableFilter // Table filter
     Output      Output      // Output settings
+    Mappings    []TableMapping // Source ↔ target table/column mappings
 }
 
 type Comparison struct {
     Mode                       string        // sampling / full (default: sampling)
     SampleSize                 int           // [sampling] samples per table (default: 1000)
     Parallelism                int           // number of tables processed concurrently (default: 5)
-    RetryEnabled               bool          // enable re-verification (default: true)
-    RetryDelay                 time.Duration // wait time before re-verification (default: 5s)
     IgnoreDatetimePrecision    bool          // compare datetimes at second precision (default: true)
     IgnoreZeroDatetime         bool          // treat 0000-00-00 00:00:00 the same as NULL (default: true)
     IgnoreJSONKeyOrder         bool          // ignore JSON key order (default: true)
@@ -468,8 +447,8 @@ With `ignore_large_columns: true`, the following column types are excluded from 
 | **zero datetime** | Handles MySQL `0000-00-00 00:00:00` values that were converted to NULL in TiDB (`ignore_zero_datetime`) |
 | **JSON key order** | Handles differences in JSON key ordering between MySQL and TiDB (`ignore_json_key_order`) |
 | **Character set** | Standardized on UTF8MB4 |
-| **Floating point** | Configurable tolerance for FLOAT/DOUBLE errors |
-| **Replication lag** | Wait time before re-verification (default 5 seconds) |
+| **Floating point** | Values must match exactly; there is no tolerance setting for FLOAT/DOUBLE |
+| **Replication lag** | Re-check mismatches later with `retry` mode |
 | **Large columns** | Option to exclude TEXT/BLOB/JSON (`ignore_large_columns`) |
 | **Tables without a PK** | A UQ is used; if there is none, the table is skipped with a warning |
 
@@ -499,9 +478,6 @@ my-db-compare/
 │   │   ├── hash_test.go
 │   │   ├── compare.go
 │   │   └── compare_test.go
-│   ├── verifier/
-│   │   ├── reverify.go
-│   │   └── reverify_test.go
 │   └── reporter/
 │       ├── logger.go
 │       ├── logger_test.go
