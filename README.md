@@ -4,11 +4,11 @@
 
 `my-db-compare` reads rows from a *source* database and a *target* database, compares them row by row, and writes every difference it finds to a log you can inspect, re-check, or turn into fix-up SQL.
 
-It was built for database migrations (for example, MySQL/Aurora → TiDB), where you want proof that the copy matches the original before you switch traffic over.
+It was built for database migrations between MySQL-compatible databases, where you want proof that the copy matches the original before you switch traffic over.
 
 ```
-   source DB                      target DB
-  (MySQL/Aurora)                   (TiDB, ...)
+        source DB                       target DB
+ (MySQL, Aurora, TiDB, ...)      (MySQL, Aurora, TiDB, ...)
         │                              │
         └──────────┐        ┌──────────┘
                    ▼        ▼
