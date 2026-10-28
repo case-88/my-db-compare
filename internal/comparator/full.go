@@ -349,11 +349,15 @@ func (fc *FullComparer) createPartitions(minVal, maxVal interface{}, count int) 
 	case int64:
 		max := maxVal.(int64)
 		rangeSize := (max - min) / int64(count)
+		if rangeSize == 0 {
+			return []PartitionRange{{Index: 0, MinValue: min, MaxValue: max}}
+		}
+		// Ranges are inclusive on both ends, so each ends right before the next starts
 		for i := 0; i < count; i++ {
 			partitions[i] = PartitionRange{
 				Index:    i,
 				MinValue: min + int64(i)*rangeSize,
-				MaxValue: min + int64(i+1)*rangeSize,
+				MaxValue: min + int64(i+1)*rangeSize - 1,
 			}
 		}
 		// Last partition extends to max
@@ -361,11 +365,14 @@ func (fc *FullComparer) createPartitions(minVal, maxVal interface{}, count int) 
 	case uint64:
 		max := maxVal.(uint64)
 		rangeSize := (max - min) / uint64(count)
+		if rangeSize == 0 {
+			return []PartitionRange{{Index: 0, MinValue: min, MaxValue: max}}
+		}
 		for i := 0; i < count; i++ {
 			partitions[i] = PartitionRange{
 				Index:    i,
 				MinValue: min + uint64(i)*rangeSize,
-				MaxValue: min + uint64(i+1)*rangeSize,
+				MaxValue: min + uint64(i+1)*rangeSize - 1,
 			}
 		}
 		partitions[count-1].MaxValue = max
