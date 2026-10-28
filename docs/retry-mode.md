@@ -44,7 +44,8 @@ Retry must recognize all three mismatch formats:
 
 ## Retry Re-verification
 
-- Re-run each mismatch record's `query` against both the source and target DBs.
+- Re-run each mismatch record's `query` against the source DB, and against the target DB too, unless the record has a `target_query`.
+- Records of [mapped tables](../README.md#mapping-tables-and-columns) carry a `target_query` written with the target's table and column names; retry runs it on the target instead. The config must contain the same `mappings`. If the config and a record disagree, the record is kept unchanged and a warning is logged once per table.
 - Compare the results to check whether the mismatch still exists.
 - If the mismatch persists, record it using the existing mismatch log rules:
   - `mismatch-*.{jsonl|json|txt}`
