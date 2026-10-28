@@ -92,7 +92,7 @@ type Comparison struct {
 	GenerateCorrectionQueries *bool  `yaml:"generate_correction_queries" mapstructure:"generate_correction_queries"` // nil = false (default: don't generate)
 
 	// Full mode specific options
-	FullModeChunkSize   int `yaml:"full_mode_chunk_size" mapstructure:"full_mode_chunk_size"`   // chunk size for full mode (default: 5000)
+	FullModeChunkSize   int `yaml:"full_mode_chunk_size" mapstructure:"full_mode_chunk_size"`   // chunk size for full mode (default: 2000)
 	FullModeDelayMs     int `yaml:"full_mode_delay_ms" mapstructure:"full_mode_delay_ms"`       // delay between chunks in ms (default: 10)
 	FullModeParallelism int `yaml:"full_mode_parallelism" mapstructure:"full_mode_parallelism"` // partition parallelism within table (default: 4)
 }

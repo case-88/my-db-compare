@@ -22,13 +22,13 @@ func TestSummary_AddResult(t *testing.T) {
 
 	// Add compared table
 	s.AddResult(&TableResult{
-		Table:         "testdb.users",
-		Sampled:       100,
-		Matched:       95,
+		Table:           "testdb.users",
+		Sampled:         100,
+		Matched:         95,
 		MissingInTarget: 3,
-		Different:     2,
-		Verified:      5,
-		Resolved:      0,
+		Different:       2,
+		Verified:        5,
+		Resolved:        0,
 	})
 
 	assert.Equal(t, 1, s.TotalTables)
@@ -105,13 +105,13 @@ func TestSummary_Duration(t *testing.T) {
 func TestSummary_Print(t *testing.T) {
 	s := NewSummary()
 	s.AddResult(&TableResult{
-		Table:         "testdb.users",
-		Sampled:       1000,
-		Matched:       990,
+		Table:           "testdb.users",
+		Sampled:         1000,
+		Matched:         990,
 		MissingInTarget: 5,
-		Different:     5,
-		Verified:      10,
-		Duration:      time.Second,
+		Different:       5,
+		Verified:        10,
+		Duration:        time.Second,
 	})
 	s.AddResult(&TableResult{
 		Table:      "testdb.logs",
