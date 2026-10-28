@@ -71,6 +71,19 @@ type TableMeta struct {
 	UKColumns     []string     // Unique key columns (fallback if no PK)
 	Columns       []ColumnMeta // All columns
 	EstimatedRows int64        // Estimated row count from information_schema
+
+	// ColumnMap maps a column name (lowercase) to the column that physically
+	// stores it in this table. Used to read a target table whose columns are
+	// named differently from the source. nil means names are the same.
+	ColumnMap map[string]string
+}
+
+// PhysicalColumn returns the column that stores col in this table
+func (t TableMeta) PhysicalColumn(col string) string {
+	if physical, ok := t.ColumnMap[strings.ToLower(col)]; ok {
+		return physical
+	}
+	return col
 }
 
 // FullName returns schema.table format

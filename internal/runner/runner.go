@@ -88,7 +88,11 @@ func (r *Runner) DryRun(ctx context.Context) error {
 	fmt.Printf("\nTables to compare (%d):\n", len(tables))
 
 	for _, t := range tables {
-		fmt.Printf("  - %s (estimated %d rows)\n", t.FullName(), t.EstimatedRows)
+		name := t.FullName()
+		if target := r.targetTable(t); target.FullName() != name {
+			name += " -> " + target.FullName()
+		}
+		fmt.Printf("  - %s (estimated %d rows)\n", name, t.EstimatedRows)
 	}
 
 	return nil
@@ -535,8 +539,9 @@ func (r *Runner) getTablesToCompare(ctx context.Context) ([]types.TableMeta, err
 		allTables = append(allTables, tables...)
 	}
 
-	// Apply filters
+	// Apply filters (mapped tables are always compared)
 	filtered := db.FilterTables(allTables, r.cfg.Tables.Include, r.cfg.Tables.Exclude)
+	filtered = r.addMappedTables(allTables, filtered)
 	r.logger.Info("step 4/4: apply filters",
 		zap.Int("before", len(allTables)),
 		zap.Int("after", len(filtered)),
@@ -561,8 +566,108 @@ func (r *Runner) getTablesToCompare(ctx context.Context) ([]types.TableMeta, err
 		validTables = append(validTables, meta)
 	}
 
+	if err := r.checkMappings(ctx, validTables); err != nil {
+		return nil, err
+	}
+
 	r.logger.Info("metadata done", zap.Int("tables", len(validTables)))
 	return validTables, nil
+}
+
+// addMappedTables appends mapping source tables that the filters left out
+func (r *Runner) addMappedTables(allTables, filtered []types.TableMeta) []types.TableMeta {
+	if len(r.cfg.Mappings) == 0 {
+		return filtered
+	}
+
+	selected := make(map[string]bool, len(filtered))
+	for _, t := range filtered {
+		selected[strings.ToLower(t.FullName())] = true
+	}
+	for _, t := range allTables {
+		key := strings.ToLower(t.FullName())
+		if !selected[key] && r.cfg.MappingFor(t.FullName()) != nil {
+			filtered = append(filtered, t)
+			selected[key] = true
+		}
+	}
+	return filtered
+}
+
+// targetTable returns the table to read on the target side. For a mapped
+// table it points at the mapped target table and its column names.
+func (r *Runner) targetTable(table types.TableMeta) types.TableMeta {
+	m := r.cfg.MappingFor(table.FullName())
+	if m == nil {
+		return table
+	}
+	schema, name, _ := config.SplitTableName(m.Target)
+	target := table
+	target.Schema = schema
+	target.Name = name
+	target.ColumnMap = m.ColumnMap()
+	return target
+}
+
+// checkMappings verifies that every mapping points at existing tables and
+// columns, so a typo fails the run instead of showing up as missing rows.
+func (r *Runner) checkMappings(ctx context.Context, tables []types.TableMeta) error {
+	if len(r.cfg.Mappings) == 0 {
+		return nil
+	}
+
+	sourceByName := make(map[string]types.TableMeta, len(tables))
+	for _, t := range tables {
+		sourceByName[strings.ToLower(t.FullName())] = t
+	}
+
+	var targets []types.TableMeta
+	for _, m := range r.cfg.Mappings {
+		if _, ok := sourceByName[strings.ToLower(m.Source)]; !ok {
+			return fmt.Errorf("mapping source table %s not found", m.Source)
+		}
+		schema, name, _ := config.SplitTableName(m.Target)
+		targets = append(targets, types.TableMeta{Schema: schema, Name: name})
+	}
+
+	targetMetas, err := r.targetMeta.GetTableMetaBatch(ctx, targets)
+	if err != nil {
+		return fmt.Errorf("failed to get mapping target metadata: %w", err)
+	}
+
+	for i, m := range r.cfg.Mappings {
+		source := sourceByName[strings.ToLower(m.Source)]
+		target := targetMetas[i]
+		if len(target.Columns) == 0 {
+			return fmt.Errorf("mapping target table %s not found", m.Target)
+		}
+
+		sourceCols := columnNameSet(source.Columns)
+		for src := range m.Columns {
+			if !sourceCols[strings.ToLower(src)] {
+				return fmt.Errorf("mapping %s: source column %q not found", m.Source, src)
+			}
+		}
+
+		targetCols := columnNameSet(target.Columns)
+		mapped := r.targetTable(source)
+		for _, col := range source.Columns {
+			physical := mapped.PhysicalColumn(col.Name)
+			if !targetCols[strings.ToLower(physical)] {
+				return fmt.Errorf("mapping %s: target column %s.%s not found (for source column %s)",
+					m.Source, m.Target, physical, col.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func columnNameSet(columns []types.ColumnMeta) map[string]bool {
+	set := make(map[string]bool, len(columns))
+	for _, col := range columns {
+		set[strings.ToLower(col.Name)] = true
+	}
+	return set
 }
 
 // worker processes tables from the channel
@@ -756,6 +861,7 @@ func (r *Runner) sampleTargetByKeys(ctx context.Context, table types.TableMeta, 
 	}
 
 	keyColumns := table.KeyColumns()
+	targetTable := r.targetTable(table)
 
 	const batchSize = 1000 // MySQL IN clause safe limit
 	var allTargetRows []types.Row
@@ -786,7 +892,7 @@ func (r *Runner) sampleTargetByKeys(ctx context.Context, table types.TableMeta, 
 		}
 
 		// Batch lookup in target
-		targetRows, err := r.targetSampler.SampleByKeys(ctx, table, keyValuesList, columns)
+		targetRows, err := r.targetSampler.SampleByKeys(ctx, targetTable, keyValuesList, columns)
 		if err != nil {
 			r.logger.Warn("batch target lookup failed, falling back to individual queries",
 				zap.String("table", table.FullName()),
@@ -795,7 +901,7 @@ func (r *Runner) sampleTargetByKeys(ctx context.Context, table types.TableMeta, 
 			)
 			// Fallback to individual queries for this batch
 			for _, kv := range keyValuesList {
-				targetRow, err := r.targetSampler.SampleByKey(ctx, table, kv)
+				targetRow, err := r.targetSampler.SampleByKey(ctx, targetTable, kv)
 				if err != nil {
 					r.logger.Debug("failed to lookup target row",
 						zap.String("table", table.FullName()),

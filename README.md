@@ -35,6 +35,7 @@ It was built for database migrations between MySQL-compatible databases, where y
   - JSON key order
 - **Actionable output.** Each mismatch includes the primary key, the differing columns, both row values, a `SELECT` to reproduce it, and optionally a correction query (`UPDATE` / `INSERT` / `DELETE`).
 - **Flexible table filters** with wildcards, such as `app.*`, `*.users` or `*.*_backup`.
+- **Table and column mapping** for targets where tables or columns were renamed.
 
 ## Supported databases
 
@@ -159,6 +160,7 @@ See [`config.yaml`](config.yaml) for every option, its default, and an explanati
 | `comparison` | Mode, sample size, parallelism, comparison rules and full-mode tuning |
 | `tables` | `include` / `exclude` patterns. An empty `include` means every non-system database. |
 | `output` | Output format (`jsonl`, `json`, `text`), directory and log level |
+| `mappings` | Source ↔ target table and column name mapping (see below) |
 
 Any setting can also come from an environment variable with the `DBCOMPARE_` prefix, for example `DBCOMPARE_SOURCE_HOST` or `DBCOMPARE_COMPARISON_SAMPLE_SIZE`.
 
@@ -175,6 +177,28 @@ Patterns are always written as `database.table`, and `*` matches any text.
 | `*.*_backup` | Tables whose names end with `_backup` |
 
 A table is compared when it matches at least one `include` pattern and no `exclude` pattern.
+
+### Mapping tables and columns
+
+When a table or its columns were renamed on the target, map them in `mappings`:
+
+```yaml
+mappings:
+  - source: app.users
+    target: app_v2.members
+    columns:              # source column: target column
+      id: member_id
+      name: full_name
+```
+
+- Columns you don't list are assumed to have the **same name** on both sides.
+- Key columns follow the same rule. If the primary key was renamed, list it in `columns`.
+- Rows are matched by the **source** table's primary key (or unique key).
+- Mapped tables are always compared, even if `tables.include` / `exclude` would skip them.
+- Before comparing, the tool checks that every mapped table and column exists, and stops with an error if one does not.
+- Results use the source table and column names.
+
+> **Current limits:** mappings work in `sample` mode only, and cannot be combined with `generate_correction_queries`.
 
 ## Choosing a mode
 

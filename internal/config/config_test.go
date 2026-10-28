@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -306,4 +307,92 @@ func validConfig() *Config {
 	cfg.Target.User = "root"
 	cfg.Target.Database = "testdb"
 	return cfg
+}
+
+func TestMappings(t *testing.T) {
+	mapping := TableMapping{
+		Source:  "app.users",
+		Target:  "app_v2.members",
+		Columns: map[string]string{"Name": "full_name"},
+	}
+
+	t.Run("valid mapping in sample mode", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{mapping}
+		assert.NoError(t, cfg.ValidateForMode("sample"))
+	})
+
+	t.Run("rejected outside sample mode", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{mapping}
+		assert.ErrorContains(t, cfg.ValidateForMode("full"), "only supported in sample mode")
+		assert.ErrorContains(t, cfg.ValidateForMode("retry"), "only supported in sample mode")
+	})
+
+	t.Run("rejected with correction queries", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{mapping}
+		enabled := true
+		cfg.Comparison.GenerateCorrectionQueries = &enabled
+		assert.ErrorContains(t, cfg.ValidateForMode("sample"), "generate_correction_queries")
+	})
+
+	t.Run("invalid table names", func(t *testing.T) {
+		for _, name := range []string{"users", "app.*", "a.b.c", ".users"} {
+			cfg := validConfig()
+			cfg.Mappings = []TableMapping{{Source: name, Target: "app.users"}}
+			assert.ErrorContains(t, cfg.ValidateForMode("sample"), "mapping source", name)
+
+			cfg.Mappings = []TableMapping{{Source: "app.users", Target: name}}
+			assert.ErrorContains(t, cfg.ValidateForMode("sample"), "mapping target", name)
+		}
+	})
+
+	t.Run("duplicate source", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{mapping, {Source: "APP.users", Target: "x.y"}}
+		assert.ErrorContains(t, cfg.ValidateForMode("sample"), "more than once")
+	})
+
+	t.Run("lookup is case-insensitive", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{mapping}
+		require.NotNil(t, cfg.MappingFor("APP.Users"))
+		assert.Nil(t, cfg.MappingFor("app.orders"))
+	})
+
+	t.Run("column map has lowercase keys", func(t *testing.T) {
+		assert.Equal(t, map[string]string{"name": "full_name"}, mapping.ColumnMap())
+		assert.Nil(t, TableMapping{}.ColumnMap())
+	})
+
+	t.Run("source schemas are scanned", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Tables.Include = []string{"shop.*"}
+		cfg.Mappings = []TableMapping{mapping}
+		assert.ElementsMatch(t, []string{"shop", "app"}, cfg.GetSchemas())
+	})
+}
+
+func TestLoadMappings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+source: {host: s, user: u}
+target: {host: t, user: u}
+mappings:
+  - source: App.Users
+    target: App_V2.Members
+    columns:
+      UserName: Full_Name
+      email: email_address
+`), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, cfg.Mappings, 1)
+
+	m := cfg.Mappings[0]
+	assert.Equal(t, "App.Users", m.Source)
+	assert.Equal(t, "App_V2.Members", m.Target)
+	assert.Equal(t, map[string]string{"username": "Full_Name", "email": "email_address"}, m.ColumnMap())
 }
