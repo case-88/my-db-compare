@@ -201,6 +201,7 @@ func (r *Runner) retryMismatchFile(
 	target := r.targetTable(tableFromName(defaultTable))
 	mapped := target.FullName() != defaultTable || target.ColumnMap != nil
 	mappingWarned := false
+	excluded := r.excludedColumns(tableFromName(defaultTable))
 
 	handleMismatch := func(m types.Mismatch) error {
 		select {
@@ -262,6 +263,10 @@ func (r *Runner) retryMismatchFile(
 			result.Error = appendError(result.Error, targetErr)
 			return r.writeRetryMismatch(m, result, openWriter, tableLogger)
 		}
+
+		// Older records may select every column, so drop the excluded ones
+		dropColumns(srcRow, excluded)
+		dropColumns(targetRow, excluded)
 
 		now := time.Now()
 
@@ -368,6 +373,18 @@ func (r *Runner) populateCorrectionQuery(m *types.Mismatch, target types.TableMe
 		return
 	}
 	m.CorrectionQuery = target.CorrectionQuery(m.Type, m.PK, m.SourceData, m.DiffColumns)
+}
+
+// dropColumns removes the given lowercase column names from row
+func dropColumns(row types.Row, columns map[string]bool) {
+	if len(columns) == 0 {
+		return
+	}
+	for col := range row {
+		if columns[strings.ToLower(col)] {
+			delete(row, col)
+		}
+	}
 }
 
 // tableFromName returns a TableMeta for a "database.table" name

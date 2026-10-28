@@ -337,6 +337,22 @@ func TestMappings(t *testing.T) {
 		}
 	})
 
+	t.Run("exclude", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Mappings = []TableMapping{{Source: "app.users", Target: "app.users", Exclude: []string{"Phone", "fax"}}}
+		require.NoError(t, cfg.ValidateForMode("sample"))
+		assert.Equal(t, map[string]bool{"phone": true, "fax": true}, cfg.Mappings[0].ExcludeSet())
+
+		cfg.Mappings[0].Exclude = []string{""}
+		assert.ErrorContains(t, cfg.ValidateForMode("sample"), "empty column name in exclude")
+
+		cfg.Mappings[0].Exclude = []string{"NAME"}
+		cfg.Mappings[0].Columns = map[string]string{"name": "full_name"}
+		assert.ErrorContains(t, cfg.ValidateForMode("sample"), "in both columns and exclude")
+
+		assert.Nil(t, TableMapping{}.ExcludeSet())
+	})
+
 	t.Run("duplicate source", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Mappings = []TableMapping{mapping, {Source: "APP.users", Target: "x.y"}}

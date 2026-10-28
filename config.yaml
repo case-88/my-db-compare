@@ -50,16 +50,29 @@ tables:
     - "*.*_backup"                # tables ending with _backup
     - "app.schema_migrations"
 
-# Table and column mappings, for targets where tables or columns were renamed.
+# Table and column mappings, for targets that differ from the source.
 # Without a mapping, a source table is compared with the same-named target
 # table, column by column with the same names. Works in every mode.
 #
+# Each entry can:
+#   target   compare with a differently named target table
+#   columns  map renamed columns (source column: target column)
+#   exclude  leave source columns out of the comparison
+#
+# Rules:
 # - List only renamed columns; unlisted columns keep their name.
 # - Key columns follow the same mapping: if the primary key was renamed,
-#   list it too. Rows are matched by the source table's primary/unique key.
-# - Every source column must exist on the target (extra target columns are ignored).
+#   list it in columns. Rows are matched by the source table's primary/unique key.
+# - Every compared source column must exist on the target. If one was dropped,
+#   put it in exclude.
+# - Target-only columns are never read; don't list them.
+# - exclude takes source column names. Key columns cannot be excluded, and a
+#   column cannot be in both columns and exclude.
+# - Differences in excluded columns are never reported. Excluded columns are
+#   shown in the log and in --dry-run.
 # - Mapped tables are always compared, even if tables.include/exclude skip them.
-# - Mapped tables and columns are checked before comparing; a typo stops the run.
+# - In sample and full mode, tables and column names (including exclude) are
+#   checked before comparing; a typo stops the run.
 # - Retry needs the same mappings as the run that produced the results.
 #
 # Uncomment and edit to use.
@@ -69,8 +82,12 @@ tables:
 #     columns:                      # source column: target column
 #       id: member_id               # renamed primary key
 #       name: full_name
+#     exclude: [phone]              # dropped on the target
 #   - source: shop.orders
 #     target: shop.orders_new       # table renamed, columns unchanged
+#   - source: shop.payments         # same table on both sides,
+#     target: shop.payments         # one column skipped
+#     exclude: [legacy_memo]
 
 output:
   format: jsonl                   # jsonl | json | text (default: jsonl)
